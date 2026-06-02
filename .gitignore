@@ -1,18 +1,33 @@
-# Python
+# ─── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
 .venv/
 venv/
+.env
 
-# Local secrets (Fernet key for API-key encryption)
-agent_service/.secret_key
+# ─── 敏感配置（绝对不能提交）────────────────────────────────────────────────
+agent_service/.secret_key          # Fernet 加密主密钥
+agent_service/config.yaml          # 含 API Key（用 config.yaml.example 替代）
+agent_service/mcp/lark_mcp.json    # 含飞书 App Secret（用 lark_mcp.json.example 替代）
 
-# Vector store & runtime data
+# ─── 向量库与运行时数据 ──────────────────────────────────────────────────────
 agent_service/chroma_persist/
+chroma_persist/
+agent_service/conversations/
+agent_service/lark_conversations/
+agent_service/wiki/
 
-# Editor / OS
+# ─── 知识库文档（含业务数据，不随代码发布）──────────────────────────────────
+agent_service/docs/
+
+# ─── 前端构建产物 ─────────────────────────────────────────────────────────────
+web-admin/node_modules/
+web-admin/dist/
+
+# ─── 编辑器 / 系统 ────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 .DS_Store
+Thumbs.db

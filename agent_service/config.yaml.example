@@ -1,0 +1,55 @@
+# RAG 配置文件示例
+# 复制为 config.yaml 后按注释填写，API Key 建议通过管理员端「系统设置」写入（自动加密）
+
+persist_directory: "chroma_persist"
+collection_name: "simple_rag"
+embedder_name: "text-embedding-v4"
+use_sentence_transformers: true
+api_provider: "openai"
+api_key: ""       # 旧版兜底字段，建议留空，使用下方 embedding.api_key
+api_base: ""      # 旧版兜底字段，建议留空，使用下方 embedding.base_url
+source_path: "docs"
+
+chunk_size: 400
+chunk_overlap: 100
+
+allowed_extensions:
+  - ".txt"
+  - ".md"
+  - ".rst"
+  - ".html"
+
+top_k: 5
+bm25_k: 8
+vector_k: 8
+bm25_weight: 0.5
+reset_vector_store: false
+
+# ─── API 配置 ────────────────────────────────────────────────────────────────
+# api_key 字段支持加密存储：以 "enc:" 开头的为 Fernet 密文（由 settings 接口写入）。
+# cleaner / reranker / embedding 字段留空（""）表示继承 chat 段。
+chat:
+  api_key: ""           # 必填：你的大模型 API Key（支持 OpenAI 兼容接口）
+  base_url: ""          # 示例（阿里云百炼）：https://dashscope.aliyuncs.com/compatible-mode/v1
+  model_name: ""        # 示例：qwen3-max / gpt-4o / deepseek-chat
+  rag_score_threshold: 0.3   # 知识库命中分数低于此值时，改用对话上下文回答
+
+cleaner:
+  api_key: ""           # 留空则继承 chat
+  base_url: ""
+  model_name: ""        # 留空则继承 chat（可单独指定更便宜的模型）
+
+reranker:
+  api_key: ""           # 留空则继承 chat
+  base_url: ""
+  model_name: ""        # 示例：gte-rerank-v2
+
+embedding:
+  api_key: ""           # 留空则继承 chat
+  base_url: ""
+  model_name: ""        # 示例：text-embedding-v4 / text-embedding-3-small
+
+# ─── 数据源权重 ───────────────────────────────────────────────────────────────
+source_weights:
+  docs: 1.0    # agent_service/docs/ 下的文档（主知识源）
+  wiki: 0.7    # agent_service/wiki/ 下的反馈沉淀（置信度略低）

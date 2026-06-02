@@ -1,6 +1,6 @@
 {
-  "app_id": "",
-  "app_secret": "",
+  "app_id":     "你的飞书 App ID（cli_xxxxxxxxxxxxxxxx）",
+  "app_secret": "你的飞书 App Secret",
   "verification_token": "",
   "encrypt_key": "",
   "mcpServers": {
@@ -11,8 +11,8 @@
         "-y",
         "@larksuiteoapi/lark-mcp",
         "mcp",
-        "-a", "",
-        "-s", ""
+        "-a", "你的飞书 App ID",
+        "-s", "你的飞书 App Secret"
       ]
     }
   }
