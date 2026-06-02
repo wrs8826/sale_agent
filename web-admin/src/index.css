@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    color: #171717;
+    background: #ffffff;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin::-webkit-scrollbar { width: 4px; }
+  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 2px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+}
+
+/* Markdown styles inside chat */
+.prose-chat h1, .prose-chat h2, .prose-chat h3 { font-weight: 600; margin: 12px 0 6px; }
+.prose-chat h1 { font-size: 18px; }
+.prose-chat h2 { font-size: 16px; }
+.prose-chat h3 { font-size: 14px; }
+.prose-chat p { margin: 6px 0; }
+.prose-chat ul, .prose-chat ol { padding-left: 20px; margin: 6px 0; }
+.prose-chat li { margin: 2px 0; }
+.prose-chat code:not(pre code) {
+  background: #f3f4f6; padding: 1px 5px; border-radius: 4px;
+  font-size: 13px; font-family: 'Courier New', monospace;
+}
+.prose-chat pre {
+  background: #1e1e1e; color: #d4d4d4; padding: 12px 16px;
+  border-radius: 8px; overflow-x: auto; margin: 8px 0;
+  font-size: 13px; font-family: 'Courier New', monospace;
+}
+.prose-chat blockquote {
+  border-left: 3px solid #e5e5e5; padding-left: 12px;
+  color: #6b6b6b; margin: 8px 0;
+}
+.prose-chat table { border-collapse: collapse; width: 100%; margin: 8px 0; }
+.prose-chat th, .prose-chat td { border: 1px solid #e5e5e5; padding: 6px 10px; text-align: left; }
+.prose-chat th { background: #f7f7f8; font-weight: 600; }

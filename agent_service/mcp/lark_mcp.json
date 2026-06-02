@@ -1,0 +1,19 @@
+{
+  "app_id": "cli_aa97a617a9f95bdb",
+  "app_secret": "jwLTiyxJD0KYonNOB7iojgetVZufGivz",
+  "verification_token": "",
+  "encrypt_key": "",
+  "mcpServers": {
+    "lark-mcp": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@larksuiteoapi/lark-mcp",
+        "mcp",
+        "-a", "cli_aa97a617a9f95bdb",
+        "-s", "jwLTiyxJD0KYonNOB7iojgetVZufGivz"
+      ]
+    }
+  }
+}

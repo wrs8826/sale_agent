@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>销售 Agent · 用户端</title>
+  <link rel="stylesheet" href="/assets/common.css">
+  <style>
+    body { background: #f0f4ff; }
+    main { align-items: center; justify-content: center; }
+
+    .box {
+      background: #fff;
+      border: 1px solid #e8ecf4;
+      border-radius: 14px;
+      padding: 2.2rem 2.6rem 2rem;
+      width: 100%;
+      max-width: 420px;
+      box-shadow: 0 8px 32px rgba(79,126,247,.1);
+    }
+
+    /* ── tab 切换 ── */
+    .tabs {
+      display: flex;
+      border-bottom: 2px solid #eef0f8;
+      margin-bottom: 1.6rem;
+      gap: 0;
+    }
+    .tab-btn {
+      flex: 1;
+      background: none;
+      border: none;
+      padding: .55rem 0;
+      font-size: .95rem;
+      font-weight: 600;
+      color: #aaa;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+      transition: color .15s, border-color .15s;
+    }
+    .tab-btn.active {
+      color: #4f7ef7;
+      border-bottom-color: #4f7ef7;
+    }
+
+    /* ── panel ── */
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    /* ── fields ── */
+    .field { margin-bottom: 1rem; }
+    .field label {
+      display: block;
+      font-size: .81rem;
+      font-weight: 600;
+      color: #444;
+      margin-bottom: .3rem;
+    }
+    .field input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: .58rem .82rem;
+      border: 1px solid #dde3f0;
+      border-radius: 8px;
+      font-size: .93rem;
+      color: #222;
+      outline: none;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .field input:focus {
+      border-color: #4f7ef7;
+      box-shadow: 0 0 0 3px rgba(79,126,247,.12);
+    }
+    .field input.invalid {
+      border-color: #e74c3c;
+    }
+
+    /* ── primary btn ── */
+    .btn-primary {
+      width: 100%;
+      padding: .68rem;
+      background: #4f7ef7;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: .98rem;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: .4rem;
+      transition: background .15s, transform .1s;
+    }
+    .btn-primary:hover { background: #3a6be0; }
+    .btn-primary:active { transform: scale(.98); }
+    .btn-primary:disabled { background: #a0b4f0; cursor: not-allowed; }
+
+    /* ── messages ── */
+    .msg {
+      font-size: .82rem;
+      margin-top: .75rem;
+      text-align: center;
+      min-height: 1.2em;
+    }
+    .msg.error  { color: #e74c3c; }
+    .msg.success { color: #27ae60; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>销售 Agent</h1>
+  <span class="tag">qwen3-max · 混合检索 · LangGraph</span>
+</header>
+
+<main>
+  <div class="box">
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="login">登 录</button>
+      <button class="tab-btn" data-tab="register">注 册</button>
+    </div>
+
+    <!-- ── 登录 panel ── -->
+    <div class="panel active" id="panel-login">
+      <div class="field">
+        <label for="l-username">用户名</label>
+        <input id="l-username" type="text" placeholder="输入用户名" autocomplete="username">
+      </div>
+      <div class="field">
+        <label for="l-password">密码</label>
+        <input id="l-password" type="password" placeholder="输入密码" autocomplete="current-password">
+      </div>
+      <button class="btn-primary" id="btn-login">登 录</button>
+      <div class="msg error" id="login-msg"></div>
+    </div>
+
+    <!-- ── 注册 panel ── -->
+    <div class="panel" id="panel-register">
+      <div class="field">
+        <label for="r-username">用户名 <span style="color:#aaa;font-weight:400">（2~32 位）</span></label>
+        <input id="r-username" type="text" placeholder="设置用户名" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="r-password">密码 <span style="color:#aaa;font-weight:400">（至少 6 位）</span></label>
+        <input id="r-password" type="password" placeholder="设置密码" autocomplete="new-password">
+      </div>
+      <div class="field">
+        <label for="r-password2">确认密码</label>
+        <input id="r-password2" type="password" placeholder="再次输入密码" autocomplete="new-password">
+      </div>
+      <div class="field">
+        <label for="r-phone">手机号</label>
+        <input id="r-phone" type="tel" placeholder="11 位手机号" maxlength="11" autocomplete="tel">
+      </div>
+      <div class="field">
+        <label for="r-dept">部门</label>
+        <input id="r-dept" type="text" placeholder="所在部门" autocomplete="off">
+      </div>
+      <button class="btn-primary" id="btn-register">注 册</button>
+      <div class="msg" id="register-msg"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+  /* ── tab 切换 ── */
+  const tabBtns = document.querySelectorAll('.tab-btn');
+  const panels  = document.querySelectorAll('.panel');
+
+  tabBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      tabBtns.forEach(b => b.classList.remove('active'));
+      panels.forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
+      // 清空提示
+      document.getElementById('login-msg').textContent = '';
+      document.getElementById('register-msg').textContent = '';
+      document.getElementById('register-msg').className = 'msg';
+    });
+  });
+
+  /* ── 登录 ── */
+  const btnLogin  = document.getElementById('btn-login');
+  const loginMsg  = document.getElementById('login-msg');
+
+  async function doLogin() {
+    const username = document.getElementById('l-username').value.trim();
+    const password = document.getElementById('l-password').value;
+    if (!username || !password) { loginMsg.textContent = '请填写用户名和密码'; return; }
+
+    btnLogin.disabled = true;
+    loginMsg.textContent = '';
+    try {
+      const res  = await fetch('/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) { loginMsg.textContent = data.error || '登录失败'; return; }
+      window.location.href = '/user';
+    } catch { loginMsg.textContent = '网络错误，请重试'; }
+    finally   { btnLogin.disabled = false; }
+  }
+
+  btnLogin.addEventListener('click', doLogin);
+  ['l-username', 'l-password'].forEach(id => {
+    document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+  });
+
+  /* ── 注册 ── */
+  const btnReg  = document.getElementById('btn-register');
+  const regMsg  = document.getElementById('register-msg');
+
+  async function doRegister() {
+    const username   = document.getElementById('r-username').value.trim();
+    const password   = document.getElementById('r-password').value;
+    const password2  = document.getElementById('r-password2').value;
+    const phone      = document.getElementById('r-phone').value.trim();
+    const department = document.getElementById('r-dept').value.trim();
+
+    if (!username || !password || !password2 || !phone || !department) {
+      showRegMsg('请填写所有字段', 'error'); return;
+    }
+    if (password !== password2) {
+      showRegMsg('两次输入的密码不一致', 'error');
+      document.getElementById('r-password2').classList.add('invalid');
+      return;
+    }
+    document.getElementById('r-password2').classList.remove('invalid');
+
+    btnReg.disabled = true;
+    regMsg.textContent = '';
+    try {
+      const res  = await fetch('/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password, phone, department }),
+      });
+      const data = await res.json();
+      if (!res.ok) { showRegMsg(data.error || '注册失败', 'error'); return; }
+
+      showRegMsg('注册成功！正在跳转到登录…', 'success');
+      // 2 秒后切到登录 tab 并预填用户名
+      setTimeout(() => {
+        tabBtns[0].click();
+        document.getElementById('l-username').value = username;
+        document.getElementById('l-password').focus();
+      }, 1500);
+    } catch { showRegMsg('网络错误，请重试', 'error'); }
+    finally  { btnReg.disabled = false; }
+  }
+
+  function showRegMsg(text, type) {
+    regMsg.textContent = text;
+    regMsg.className = 'msg ' + type;
+  }
+
+  btnReg.addEventListener('click', doRegister);
+  ['r-username', 'r-password', 'r-password2', 'r-phone', 'r-dept'].forEach(id => {
+    document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') doRegister(); });
+  });
+</script>
+
+</body>
+</html>

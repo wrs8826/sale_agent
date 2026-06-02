@@ -1,0 +1,293 @@
+# API 协议详解
+
+## 路由总览
+
+| 路由 | 方法 | 蓝图 | 说明 |
+|---|---|---|---|
+| `/` `/user` | GET | app_user.py | 用户端静态 HTML（登录保护） |
+| `/` `/admin` `/admin/knowledge` `/admin/chat` | GET | app_admin.py | 管理员端静态 HTML（admin 角色保护） |
+| `/assets/<path>` | GET | app_*.py | 静态资源 |
+| `/auth/register` | POST | auth | 用户注册（固定 user 角色） |
+| `/auth/login` | POST | auth | 用户端登录（接受 user + admin） |
+| `/auth/admin-login` | POST | auth | 管理员端登录（仅接受 admin） |
+| `/auth/logout` | POST | auth | 清除 session |
+| `/auth/me` | GET | auth | 返回当前登录信息 |
+| `/users` | POST | users | 创建新用户（仅 admin） |
+| `/users` | GET | users | 列出所有非 admin 用户（仅 admin） |
+| `/users/<id>` | PATCH | users | 修改基本信息（密码/手机/部门/封禁） |
+| `/users/<id>` | DELETE | users | 删除用户（不能删 admin 角色） |
+| `/users/<id>/settings` | GET | users | 读取用户专属四段模型配置（api_key 脱敏） |
+| `/users/<id>/settings` | POST | users | 保存用户专属模型配置（api_key 自动加密） |
+| `/users/<id>/settings/test` | POST | users | 用表单值测试四段连通性（不保存） |
+| `/files` | GET | knowledge | 列 docs/ 下文件 |
+| `/upload` | POST | knowledge | multipart 上传 |
+| `/files/<name>` | DELETE | knowledge | 删 docs/ 下文件 |
+| `/query` | POST | knowledge | RAG 检索调试（含分块参数） |
+| `/vectordb/clear` | POST | knowledge | 清空 chroma collection |
+| `/vectordb/rebuild` | POST | knowledge | **SSE** 用当前 embedding 配置重建向量库（embedding 变更后自动触发，也可手动） |
+| `/ingest` | POST | knowledge | **SSE** 单文件清洗+入库 |
+| `/agent/chat` | POST | agent | **SSE** 对话主入口 |
+| `/feedback` | POST | agent | **SSE** 评分写 wiki |
+| `/settings` | GET / POST | settings | 四段配置读写 |
+| `/settings/test` | POST | settings | 四模型连通测试 |
+| `/conversations` | GET / POST | conversations | 列表 / 新建 |
+| `/conversations/<id>` | GET / PATCH / DELETE | conversations | 取 / 改名 / 删 |
+| `/conversations/<id>/compact` | POST | conversations | 手动压缩 |
+
+## SSE 事件协议（前端契约）
+
+**所有 SSE 行格式**：`data: <json>\n\n`
+
+### `/agent/chat`
+
+| event.type | 字段 | 触发 |
+|---|---|---|
+| `status` | `message` | 通用状态文案，例如压缩进行中 |
+| `tool_start` | `name` | 节点开始（`提取关键词` / `检索知识库`） |
+| `tool_end` | `name, keywords?, count?` | 节点结束 |
+| `token` | `text` | 单个 token，**逐字追加渲染** |
+| `done` | `full_text` | 生成完成，前端定型气泡 |
+| `error` | `message` | 任何阶段失败 |
+| `warning` | `message` | 非致命警告（如自动压缩失败但继续） |
+| `conversation_saved` | `conversation_id, title, updated_at, message_count` | 持久化成功 |
+| `compact_done` | `level, compacted_count?, kept_count?, summary_preview?, unchanged?, reason?` | 手动 compact 命令的结果 |
+| `auto_compacted` | `level, compacted_count, kept_count, summary_preview, tokens_before, tokens_after` | 自动压缩完成 |
+
+### `/ingest`
+
+| event.type | 字段 |
+|---|---|
+| `reading` / `cleaning` / `storing` | `message` |
+| `result` | `raw_preview, cleaned_content, chunks_stored, raw_len, clean_len` |
+| `error` | `message` |
+
+### `/feedback`
+
+| event.type | 字段 |
+|---|---|
+| `status` | `message` |
+| `result` | `filename, filepath, cleaned_preview, raw_len, clean_len[, message]` |
+| `error` | `message` |
+
+## 请求 / 响应 schema
+
+### `POST /users`
+需 admin 角色 session。Body：
+```json
+{ "username": "2~32位", "password": "≥6位", "phone": "11位手机号", "department": "部门名（留空默认'未分配'）" }
+```
+响应：`201 { user: { id, username, role, phone, department, is_banned, chat_model, has_custom_settings, created_at } }`
+- `409` 用户名已存在；`400` 校验失败
+- `has_custom_settings` 初始为 `false`，`chat_model` 初始为 `""`
+
+### `GET /users`
+需 admin 角色 session。返回：
+```json
+{ "users": [{ "id": 1, "username": "...", "phone": "...", "department": "...",
+  "has_custom_settings": true, "chat_model": "qwen3-max",
+  "is_banned": false, "created_at": "2026-01-01 12:00" }] }
+```
+- `has_custom_settings`：用户是否配置了专属模型
+- `chat_model`：用户专属 chat.model_name（供列表展示，空则继承系统）
+
+### `PATCH /users/<id>`
+需 admin 角色 session。Body 字段可任意组合（全部可选）：
+```json
+{ "password": "新密码≥6位", "phone": "11位手机号", "department": "部门", "is_banned": true }
+```
+响应：`200 { ok: true }` / `400 校验失败` / `404 用户不存在或无权`
+
+### `DELETE /users/<id>`
+需 admin 角色 session。不能删除 admin 角色账号。
+响应：`200 { ok: true }` / `404 用户不存在或无权`
+
+### `GET /users/<id>/settings`
+返回用户四段专属模型配置（api_key 脱敏）：
+```json
+{ "settings": {
+    "chat":      { "api_key_mask": "sk-***1234", "api_key_set": true, "base_url": "...", "model_name": "..." },
+    "cleaner":   { ... },
+    "embedding": { ... },
+    "reranker":  { ... }
+}}
+```
+
+### `POST /users/<id>/settings`
+保存用户四段模型配置。api_key 若为空字符串则保留原值；非空则视为新明文并加密存储。
+```json
+{ "chat": { "api_key": "新明文或空", "base_url": "...", "model_name": "..." }, "cleaner": {...}, ... }
+```
+响应：`200 { ok: true, settings: <masked> }`
+
+### `POST /users/<id>/settings/test`
+用前端表单值（未保存）测试四段连通性。空 api_key → 自动回退到已保存值 → 再回退到系统设置。
+```json
+{ "chat": { "api_key": "...", "base_url": "...", "model_name": "..." }, ... }
+```
+响应：`{ "results": { "chat": { "ok": true, "error": "", "latency_ms": 234 }, ... } }`
+
+### `POST /auth/register`
+```json
+{ "username": "2~32位", "password": "≥6位", "phone": "11位手机号", "department": "部门名" }
+```
+响应：`201 { ok: true, username }` / `400 校验失败` / `409 用户名重复`
+
+手机号正则：`^1[3-9]\d{9}$`，角色固定为 `user`。
+
+### `POST /auth/login`
+```json
+{ "username": "...", "password": "..." }
+```
+响应：`200 { username, role }` / `401 密码错误`
+
+接受 user 和 admin 角色，写入 Flask session（7 天有效）。
+
+### `POST /auth/admin-login`
+```json
+{ "username": "...", "password": "..." }
+```
+响应：`200 { username, role }` / `401 密码错误` / `403 非 admin`
+
+role ≠ admin 时即使密码正确也返回 403。
+
+### `GET /auth/me`
+响应：`{ user_id, username, role }` / `401`
+- `user_id` 为 MySQL `users.id`（int），前端用于判断会话归属
+
+### `POST /agent/chat`
+```json
+{
+  "message": "用户问题",
+  "conversation_id": "uuid hex (optional)",
+  "top_k": 5
+}
+```
+- 若 `message.lower() ∈ {"compact", "/compact"}` 且有 `conversation_id`，触发**一级压缩**，**不进 QA 图**
+- 若有 `conversation_id`，服务端的 `get_history()` 是**唯一权威源**，客户端不能传 `history`
+- **无 `conversation_id` 且已登录**：后端自动创建新会话（绑定 `session["user_id"]`），返回 `conversation_saved` 事件携带新 ID
+- 未登录用户：不持久化，无 `conversation_saved` 事件
+- **admin 向他人会话发消息** → `403 "管理员只能查看用户对话历史，不能代用户发送消息"`（前端已通过只读模式阻断，后端作双重保护）
+
+### `POST /upload` (multipart)
+```
+form-data: file=<.txt|.md|.rst|.html>
+```
+响应：`{ok: true, filename}`
+
+### `POST /ingest`
+```json
+{ "filename": "must-exist-in-docs/" }
+```
+
+### `POST /query`
+```json
+{
+  "query": "...",
+  "chunk_size": 400, "chunk_overlap": 100, "separators": [...]|null,
+  "top_k": 5, "bm25_weight": 0.5, "bm25_k": 8, "vector_k": 8,
+  "use_reranker": false
+}
+```
+响应：`{hits: [...], rebuilt: bool, source_weights: {...}}`
+
+### `POST /settings`
+```json
+{
+  "chat":      {"api_key": "新明文 or '' 保留", "base_url": "...", "model_name": "..."},
+  "cleaner":   {...},
+  "reranker":  {...},
+  "embedding": {...}
+}
+```
+- 任一字段缺失：保留原值
+- `api_key` 为空字符串：保留原值
+- `api_key` 非空：视为新明文，加密后存储
+- 其他字段为空字符串：写回空，触发该段对 chat 的继承
+
+响应：`{ok: true, settings: <masked>, embedding_changed: bool}`
+- `embedding_changed: true` 时前端自动调 `/vectordb/rebuild` 重建向量库
+
+### `GET /settings`
+```json
+{
+  "settings": {
+    "chat":      {"api_key_mask": "sk-******1234", "api_key_set": true, "base_url": "...", "model_name": "..."},
+    "cleaner":   {...},
+    "reranker":  {...},
+    "embedding": {...}
+  }
+}
+```
+
+### `POST /settings/test`
+无 body。响应：
+```json
+{
+  "results": {
+    "chat":      {"ok": true, "error": "", "latency_ms": 234},
+    "cleaner":   {...},
+    "reranker":  {...},
+    "embedding": {...}
+  }
+}
+```
+
+### `POST /conversations`
+请求：`{title?: "..."}`，响应：会话 summary（不含 messages 体）
+- 需登录；自动绑定 `session["user_id"]`
+- 会话文件存入 `conversations/<user_id>/<uuid>.json`
+
+### `GET /conversations`
+```json
+{ "items": [ {id, user_id, title, created_at, updated_at, message_count, has_summary, compact_at}, ... ] }
+```
+按 `updated_at` 倒序
+- **普通用户**：只返回自己的（扫 `conversations/<user_id>/`）
+- **admin**：返回全部用户会话（扫所有子目录）+ 根目录遗留文件
+
+### `GET /conversations/<id>`
+完整会话 JSON（详见 `conversation-storage.md`）
+- 普通用户访问他人会话 → `403`；会话不存在 → `404`
+- admin 用 `find_conversation` 跨目录搜索，可访问任何会话
+
+### `PATCH /conversations/<id>`
+需归属校验（普通用户只能改自己的）。
+
+### `DELETE /conversations/<id>`
+需归属校验（普通用户只能删自己的）。
+
+### `POST /conversations/<id>/compact`
+请求：`{keep_tail_pairs?: 4}`，响应：`{ok, summary, compacted_count, kept_count}` 或 `{unchanged, reason}` 或 `{error}`
+需归属校验（普通用户只能压缩自己的）。
+
+## SSE 生成器写法（标准模板）
+
+```python
+from flask import Response, stream_with_context
+import json
+
+def generate():
+    try:
+        yield f"data: {json.dumps({'type':'status','message':'…'}, ensure_ascii=False)}\n\n"
+        # ... do work ...
+        yield f"data: {json.dumps({'type':'result', ...}, ensure_ascii=False)}\n\n"
+    except Exception as exc:
+        yield f"data: {json.dumps({'type':'error','message':str(exc)}, ensure_ascii=False)}\n\n"
+
+return Response(
+    stream_with_context(generate()),
+    mimetype="text/event-stream",
+    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+)
+```
+
+**ensure_ascii=False 必带**，否则中文会变 `\uXXXX`。
+**X-Accel-Buffering: no** 阻止 nginx 缓冲整流。
+
+## 加新路由的步骤
+
+1. 在合适的蓝图文件加 `@bp.route(...)` 函数
+2. 校验 → 调 `services.*` 取数据 → 落盘 / 返回
+3. 如果是 SSE，照上面模板
+4. 如果新路由要影响 RAG，结束前 `services.invalidate_rag()`
+5. 不需要改 `app.py`（蓝图已经注册）

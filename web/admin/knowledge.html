@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>知识库管理 · 销售 Agent</title>
+  <link rel="stylesheet" href="/assets/common.css">
+  <style>
+    /* ── 数据清洗 ─────────────────────────────────────────────────────────── */
+    .clean-select-box {
+      border: 1px solid #eee;
+      border-radius: 8px;
+      padding: 3% 4%;
+      background: #fafafa;
+    }
+    .clean-select-box h3 {
+      font-size: 0.76rem;
+      font-weight: 700;
+      color: #aaa;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      margin-bottom: 3%;
+    }
+    .file-chips { display: flex; flex-wrap: wrap; gap: 2% 1.5%; }
+    .file-chip {
+      padding: .38em 1em;
+      border: 1.5px solid #e0e0e0;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      color: #666;
+      background: #fff;
+      max-width: 48%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      transition: border-color .12s, background .12s, color .12s;
+    }
+    .file-chip:hover { border-color: #4f7ef7; color: #4f7ef7; }
+    .file-chip.selected { border-color: #4f7ef7; background: #eef2ff; color: #4f7ef7; font-weight: 600; }
+    .chips-empty { font-size: 0.82rem; color: #ccc; padding: 1% 0; }
+
+    .clean-action { display: flex; align-items: center; gap: 3%; }
+
+    .steps-panel {
+      border: 1px solid #eee;
+      border-radius: 8px;
+      padding: 3% 4%;
+      background: #fafafa;
+      display: flex;
+      flex-direction: column;
+      gap: 3%;
+    }
+    .steps-title {
+      font-size: 0.74rem;
+      font-weight: 700;
+      color: #bbb;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      margin-bottom: 1%;
+    }
+    .step {
+      display: flex;
+      align-items: center;
+      gap: 3%;
+      font-size: 0.86rem;
+      color: #ccc;
+      transition: color .2s;
+    }
+    .step.done   { color: #3a9e5f; }
+    .step.active { color: #4f7ef7; }
+    .step.err    { color: #e44; }
+    .step-icon {
+      width: 1.3em;
+      height: 1.3em;
+      border-radius: 50%;
+      background: #e8e8e8;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: .72em;
+      font-weight: 700;
+      transition: background .2s;
+    }
+    .step.done   .step-icon { background: #3a9e5f; color: #fff; }
+    .step.active .step-icon { background: #4f7ef7; color: #fff; animation: pulse .8s ease-in-out infinite; }
+    .step.err    .step-icon { background: #e44;    color: #fff; }
+    @keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.18)} }
+
+    .compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 3%; }
+    .compare-box h3 {
+      font-size: 0.76rem;
+      font-weight: 700;
+      color: #aaa;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      margin-bottom: 2.5%;
+      display: flex;
+      align-items: center;
+      gap: 2%;
+    }
+    .compare-box h3 .badge {
+      font-weight: normal;
+      text-transform: none;
+      letter-spacing: 0;
+      background: #f0f0f0;
+      color: #999;
+      padding: .08em .5em;
+      border-radius: 3px;
+      font-size: .85em;
+    }
+    .compare-box h3 .badge.green { background: #e8f8ee; color: #3a9e5f; }
+    .text-area {
+      border: 1px solid #eee;
+      border-radius: 8px;
+      padding: 3% 4%;
+      font-size: 0.82rem;
+      line-height: 1.8;
+      color: #444;
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 300px;
+      overflow-y: auto;
+      background: #fafafa;
+      min-height: 80px;
+    }
+    .text-area.cleaned { border-color: #b7deb4; background: #f5fbf5; }
+
+    .ingest-summary {
+      display: flex;
+      align-items: center;
+      gap: 3%;
+      padding: 3% 4%;
+      background: #f0faf4;
+      border: 1px solid #b7e8ca;
+      border-radius: 8px;
+      font-size: 0.84rem;
+      color: #2e7d4f;
+    }
+    .ingest-summary .icon { font-size: 1.2em; }
+    .ingest-summary b { font-size: 1.05em; }
+
+    /* ── RAG 检索 ─────────────────────────────────────────────────────────── */
+    /* 面板：宽度固定为 px，内部 overflow 被裁剪以防压坏外层布局 */
+    details.settings {
+      border: 1px solid #eee;
+      border-radius: 8px;
+      /* overflow: hidden; */
+      width: 100%;
+      max-width: 720px;
+      box-sizing: border-box;
+    }
+    details.settings summary {
+      padding: .6rem .9rem;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #555;
+      background: #fafafa;
+      user-select: none;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+    }
+    details.settings summary::-webkit-details-marker { display: none; }
+    details.settings[open] summary { border-bottom: 1px solid #eee; }
+    .arrow { transition: transform .2s; display: inline-block; flex-shrink: 0; }
+    details[open] .arrow { transform: rotate(90deg); }
+
+    .settings-body {
+      padding: 1rem 1rem .8rem;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0 1.5rem;
+      box-sizing: border-box;
+    }
+    /* 让 grid 列可以收缩，避免子元素撑爆整列宽度 */
+    .settings-body > div { min-width: 0; }
+
+    .group-title {
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      color: #aaa;
+      display: flex;
+      align-items: center;
+      gap: .4rem;
+      margin-bottom: .6rem;
+    }
+    .badge-rebuild {
+      font-size: 0.68rem;
+      font-weight: normal;
+      background: #fff3cd;
+      color: #856404;
+      padding: .1em .5em;
+      border-radius: 3px;
+      letter-spacing: 0;
+      text-transform: none;
+    }
+    .badge-rebuild.hidden { display: none; }
+
+    .param-row {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      margin-bottom: .7rem;
+    }
+    .param-row label { flex: 0 0 5rem; font-size: 0.82rem; color: #555; white-space: nowrap; }
+    /* min-width:0 + flex:1 1 0：允许滑块在窄列里收缩，不撑爆父容器 */
+    .param-row input[type=range] { flex: 1 1 0; min-width: 0; accent-color: #4f7ef7; cursor: pointer; }
+    .val {
+      flex: 0 0 2.2rem;
+      text-align: right;
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: #4f7ef7;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .sep-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem .6rem; margin-bottom: .6rem; }
+    .sep-item {
+      display: flex;
+      align-items: flex-start;
+      gap: .4rem;
+      font-size: 0.82rem;
+      cursor: pointer;
+      padding: .4rem .55rem;
+      border: 1px solid #eee;
+      border-radius: 6px;
+      background: #fafafa;
+      transition: border-color .1s, background .1s;
+      min-width: 0;            /* 防止 sep-name / sep-regex 长串撑爆列宽 */
+    }
+    .sep-item:hover { border-color: #c8d8fd; background: #f6f8ff; }
+    .sep-item input[type=checkbox] { accent-color: #4f7ef7; width: .9rem; height: .9rem; flex-shrink: 0; margin-top: .1em; cursor: pointer; }
+    .sep-item > div { min-width: 0; overflow: hidden; }
+    .sep-item .sep-name { font-weight: 600; color: #444; }
+    .sep-item .sep-regex {
+      font-size: 0.72rem; color: #aaa; font-family: monospace; margin-top: .2em;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      font-size: 0.85rem;
+      color: #444;
+    }
+    .toggle-row input[type=checkbox] { accent-color: #4f7ef7; width: 1rem; height: 1rem; cursor: pointer; flex-shrink: 0; }
+
+    .query-row { display: flex; gap: .8rem; align-items: stretch; }
+    .query-row input {
+      flex: 1 1 auto;
+      min-width: 0;          /* 允许在 flex 里收缩，否则会撑爆父容器 */
+      padding: .6rem .9rem;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color .15s;
+    }
+    .query-row input:focus { border-color: #4f7ef7; }
+    /* 按钮独立尺寸：用 rem 而非 %，并禁止被压缩为 0 宽 */
+    .query-row .btn {
+      flex: 0 0 auto;
+      padding: 0 1.4rem;
+      min-width: 5rem;
+    }
+
+    .result-card { border: 1px solid #eee; border-radius: 8px; padding: 4%; margin-bottom: 3%; }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1%;
+      font-size: 0.76rem;
+      color: #bbb;
+      margin-bottom: 2.5%;
+    }
+    .card-header .rank { font-weight: 700; color: #888; }
+    .result-text { font-size: 0.88rem; line-height: 1.75; color: #333; white-space: pre-wrap; word-break: break-all; }
+    .score-bar { height: 3px; background: #f0f0f0; border-radius: 2px; margin-top: 3%; overflow: hidden; }
+    .score-fill { height: 100%; background: linear-gradient(90deg, #4f7ef7, #85a8fb); border-radius: 2px; }
+    .score-fill.rerank { background: linear-gradient(90deg, #f76f4f, #fb9d85); }
+    .score-pills { display: flex; flex-wrap: wrap; gap: 2%; font-size: 0.74rem; color: #ccc; margin-top: 2%; }
+    .score-pills b { color: #999; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>知识库管理</h1>
+  <span class="tag">qwen3-max 清洗 · text-embedding-v4 · BM25 混合 · gte-rerank-v2</span>
+  <nav class="topnav">
+    <a href="/admin/knowledge" class="active">知识库管理</a>
+    <a href="/admin/chat">Agent 对话</a>
+    <a href="/admin/users">用户管理</a>
+    <a href="#" id="btn-logout">退出登录</a>
+  </nav>
+</header>
+<script>
+  document.getElementById('btn-logout').addEventListener('click', async e => {
+    e.preventDefault();
+    await fetch('/auth/logout', { method: 'POST' });
+    window.location.href = '/';
+  });
+</script>
+
+<main>
+
+  <!-- 左栏：文档管理 -->
+  <section class="panel-left">
+    <div>
+      <h2>上传文档</h2>
+      <div class="drop-zone" id="dropZone">
+        <input type="file" id="fileInput" multiple accept=".txt,.md,.rst,.html">
+        点击 或 拖拽文件到此处
+        <small>支持 .txt .md .rst .html</small>
+      </div>
+      <div class="status" id="uploadStatus" style="margin-top:2%"></div>
+    </div>
+    <div>
+      <h2>已上传文件</h2>
+      <div id="fileList"><div class="empty">暂无文件</div></div>
+    </div>
+  </section>
+
+  <!-- 右栏：清洗 + 检索 -->
+  <section class="panel-right">
+
+    <div class="tab-bar">
+      <button class="tab-btn active" id="btn-clean" onclick="switchTab('clean')">🧹 数据清洗入库</button>
+      <button class="tab-btn"        id="btn-rag"   onclick="switchTab('rag')">🔍 RAG 检索调试</button>
+    </div>
+
+    <!-- 数据清洗 -->
+    <div class="tab-pane active" id="pane-clean">
+
+      <div class="clean-select-box">
+        <h3>选择要清洗的文件</h3>
+        <div class="file-chips" id="cleanChips">
+          <span class="chips-empty">暂无文件，请先上传</span>
+        </div>
+      </div>
+
+      <div class="clean-action">
+        <button class="btn" id="cleanBtn" onclick="doClean()">清洗并入库</button>
+        <button class="btn danger" id="clearDbBtn" onclick="doClearDB()" title="删除整个向量集合，不影响 docs/ 原文件">清空向量库</button>
+        <div class="status" id="cleanStatus">选择文件后点击清洗</div>
+      </div>
+
+      <div class="steps-panel" id="stepsPanel" style="display:none">
+        <div class="steps-title">处理进度</div>
+        <div class="step" id="step-1"><div class="step-icon" id="si-1"></div><span>📄 读取文件内容</span></div>
+        <div class="step" id="step-2"><div class="step-icon" id="si-2"></div><span>🤖 调用 qwen3-max 清洗</span></div>
+        <div class="step" id="step-3"><div class="step-icon" id="si-3"></div><span>💾 嵌入并存入向量库</span></div>
+      </div>
+
+      <div class="compare-grid" id="compareGrid" style="display:none">
+        <div class="compare-box">
+          <h3>原始内容 <span class="badge" id="rawBadge"></span></h3>
+          <div class="text-area" id="rawContent"></div>
+        </div>
+        <div class="compare-box">
+          <h3>清洗后内容 <span class="badge green" id="cleanBadge"></span></h3>
+          <div class="text-area cleaned" id="cleanedContent"></div>
+        </div>
+      </div>
+
+      <div class="ingest-summary" id="ingestSummary" style="display:none">
+        <span class="icon">✅</span>
+        <span id="summaryText"></span>
+      </div>
+
+    </div>
+
+    <!-- RAG 检索 -->
+    <div class="tab-pane" id="pane-rag">
+
+      <details class="settings" id="paramsDetails" open>
+        <summary><span class="arrow">▶</span> ⚙ 参数设置</summary>
+        <div class="settings-body">
+
+          <div>
+            <div class="group-title">索引参数 <span class="badge-rebuild hidden" id="rebuildBadge">需重建</span></div>
+            <div class="param-row">
+              <label>分块大小</label>
+              <input type="range" id="s_cs" min="100" max="2000" step="50" value="400">
+              <span class="val" id="v_cs">400</span>
+            </div>
+            <div class="param-row">
+              <label>重叠长度</label>
+              <input type="range" id="s_co" min="0" max="500" step="10" value="100">
+              <span class="val" id="v_co">100</span>
+            </div>
+            <div class="group-title" style="margin-top:4%">分隔符 <span style="font-weight:normal;text-transform:none;letter-spacing:0">(优先级↓)</span></div>
+            <div class="sep-grid" id="sepGrid"></div>
+          </div>
+
+          <div>
+            <div class="group-title">检索参数</div>
+            <div class="param-row">
+              <label>Top K</label>
+              <input type="range" id="s_tk" min="1" max="20" step="1" value="5">
+              <span class="val" id="v_tk">5</span>
+            </div>
+            <div class="param-row">
+              <label>BM25 权重</label>
+              <input type="range" id="s_bw" min="0" max="1" step="0.05" value="0.5">
+              <span class="val" id="v_bw">0.50</span>
+            </div>
+            <div class="param-row">
+              <label>BM25 K</label>
+              <input type="range" id="s_bk" min="1" max="20" step="1" value="8">
+              <span class="val" id="v_bk">8</span>
+            </div>
+            <div class="param-row">
+              <label>向量 K</label>
+              <input type="range" id="s_vk" min="1" max="20" step="1" value="8">
+              <span class="val" id="v_vk">8</span>
+            </div>
+            <div class="group-title" style="margin-top:4%">重排序</div>
+            <div class="toggle-row">
+              <input type="checkbox" id="s_rerank">
+              <label for="s_rerank">启用 <b>gte-rerank-v2</b></label>
+            </div>
+          </div>
+
+        </div>
+      </details>
+
+      <div>
+        <h2>检索测试</h2>
+        <div class="query-row">
+          <input type="text" id="queryInput" placeholder="输入查询内容，Enter 或点击检索…">
+          <button class="btn" id="queryBtn">检索</button>
+        </div>
+        <div class="status" id="queryStatus"></div>
+      </div>
+
+      <div id="results"></div>
+    </div>
+
+  </section>
+</main>
+
+<script>
+// ══════════════════════════════════════════════════════════════════════════════
+// 通用工具
+// ══════════════════════════════════════════════════════════════════════════════
+function esc(s) {
+  return String(s ?? "")
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+function fmt(n, d=3) { return (+(n??0)).toFixed(d); }
+function setStatus(el, msg, cls="") {
+  el.textContent = msg;
+  el.className = "status" + (cls ? " " + cls : "");
+}
+
+function switchTab(name) {
+  document.querySelectorAll(".tab-pane").forEach(p => p.classList.remove("active"));
+  document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+  document.getElementById("pane-" + name).classList.add("active");
+  document.getElementById("btn-" + name).classList.add("active");
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 文件管理
+// ══════════════════════════════════════════════════════════════════════════════
+let selectedFile = null;
+
+async function loadFiles() {
+  const res = await fetch("/files");
+  const files = await res.json();
+
+  const listEl = document.getElementById("fileList");
+  listEl.innerHTML = files.length
+    ? files.map(f => `
+        <div class="file-item">
+          <span class="name" title="${esc(f)}">${esc(f)}</span>
+          <button class="del" onclick="delFile('${esc(f)}')" title="删除">✕</button>
+        </div>`).join("")
+    : '<div class="empty">暂无文件</div>';
+
+  renderCleanChips(files);
+}
+
+function renderCleanChips(files) {
+  const box = document.getElementById("cleanChips");
+  if (!files.length) { box.innerHTML = '<span class="chips-empty">暂无文件，请先上传</span>'; return; }
+  box.innerHTML = files.map(f => `
+    <div class="file-chip" id="chip-${CSS.escape(f)}" title="${esc(f)}"
+         onclick="selectCleanFile('${esc(f)}')">${esc(f)}</div>`).join("");
+  if (selectedFile && files.includes(selectedFile))
+    document.getElementById("chip-" + CSS.escape(selectedFile))?.classList.add("selected");
+  else selectedFile = null;
+}
+
+async function delFile(name) {
+  await fetch(`/files/${encodeURIComponent(name)}`, { method: "DELETE" });
+  loadFiles();
+}
+
+const dropZone   = document.getElementById("dropZone");
+const fileInput  = document.getElementById("fileInput");
+const uploadStat = document.getElementById("uploadStatus");
+
+dropZone.addEventListener("click",    () => fileInput.click());
+dropZone.addEventListener("dragover",  e => { e.preventDefault(); dropZone.classList.add("over"); });
+dropZone.addEventListener("dragleave", () => dropZone.classList.remove("over"));
+dropZone.addEventListener("drop",      e => { e.preventDefault(); dropZone.classList.remove("over"); doUpload(e.dataTransfer.files); });
+fileInput.addEventListener("change",   () => { doUpload(fileInput.files); fileInput.value = ""; });
+
+async function doUpload(files) {
+  if (!files.length) return;
+  setStatus(uploadStat, "上传中…", "ing");
+  let ok = 0, lastErr = "";
+  for (const file of files) {
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const r = await fetch("/upload", { method: "POST", body: fd });
+      const d = await r.json();
+      if (d.ok) ok++; else lastErr = d.error;
+    } catch(e) { lastErr = e.message; }
+  }
+  setStatus(uploadStat,
+    ok ? `✓ 上传 ${ok} 个文件${lastErr ? "，部分失败" : ""}` : (lastErr || "上传失败"),
+    ok ? "ok" : "err");
+  loadFiles();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 数据清洗
+// ══════════════════════════════════════════════════════════════════════════════
+function selectCleanFile(name) {
+  selectedFile = name;
+  document.querySelectorAll(".file-chip").forEach(c => c.classList.remove("selected"));
+  document.getElementById("chip-" + CSS.escape(name))?.classList.add("selected");
+  resetCleanUI();
+  setStatus(document.getElementById("cleanStatus"), `已选中：${name}`, "");
+}
+
+function resetCleanUI() {
+  document.getElementById("stepsPanel").style.display    = "none";
+  document.getElementById("compareGrid").style.display   = "none";
+  document.getElementById("ingestSummary").style.display = "none";
+  setStep(1, "pending"); setStep(2, "pending"); setStep(3, "pending");
+}
+
+function setStep(n, state) {
+  const step = document.getElementById(`step-${n}`);
+  const icon = document.getElementById(`si-${n}`);
+  step.className = "step " + state;
+  icon.textContent = state === "done" ? "✓" : state === "err" ? "✗" : String(n);
+}
+
+async function doClean() {
+  if (!selectedFile) {
+    setStatus(document.getElementById("cleanStatus"), "请先选择一个文件", "err");
+    return;
+  }
+
+  const cleanBtn  = document.getElementById("cleanBtn");
+  const cleanStat = document.getElementById("cleanStatus");
+  cleanBtn.disabled = true;
+
+  document.getElementById("stepsPanel").style.display   = "flex";
+  document.getElementById("compareGrid").style.display  = "none";
+  document.getElementById("ingestSummary").style.display = "none";
+  setStep(1, "pending"); setStep(2, "pending"); setStep(3, "pending");
+  setStatus(cleanStat, "处理中…", "ing");
+
+  try {
+    const resp = await fetch("/ingest", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ filename: selectedFile }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ error: resp.statusText }));
+      setStatus(cleanStat, "错误: " + (err.error || resp.statusText), "err");
+      return;
+    }
+
+    const reader  = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+
+      const lines = buf.split("\n");
+      buf = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        let evt;
+        try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
+
+        if (evt.type === "reading") {
+          setStep(1, "active"); setStatus(cleanStat, "读取文件内容…", "ing");
+        } else if (evt.type === "cleaning") {
+          setStep(1, "done"); setStep(2, "active"); setStatus(cleanStat, evt.message, "ing");
+        } else if (evt.type === "storing") {
+          setStep(2, "done"); setStep(3, "active"); setStatus(cleanStat, evt.message, "ing");
+        } else if (evt.type === "result") {
+          setStep(3, "done");
+          showCleanResult(evt);
+          const msg = evt.chunks_stored > 0
+            ? `✓ 完成，已存入 ${evt.chunks_stored} 个分块`
+            : "✓ 完成（无业务内容，未写入向量库）";
+          setStatus(cleanStat, msg, "ok");
+        } else if (evt.type === "error") {
+          [1,2,3].forEach(n => {
+            if (document.getElementById(`step-${n}`).classList.contains("active"))
+              setStep(n, "err");
+          });
+          setStatus(cleanStat, "错误: " + evt.message, "err");
+        }
+      }
+    }
+  } catch(e) {
+    setStatus(document.getElementById("cleanStatus"), "请求失败: " + e.message, "err");
+  } finally {
+    cleanBtn.disabled = false;
+  }
+}
+
+async function doClearDB() {
+  if (!confirm("确定要清空整个向量库吗？\n\n• 将删除集合中的所有已入库分块\n• 不会影响 docs/ 中的原文件\n• 此操作不可撤销")) return;
+  const btn  = document.getElementById("clearDbBtn");
+  const stat = document.getElementById("cleanStatus");
+  btn.disabled = true;
+  setStatus(stat, "清空向量库…", "ing");
+  try {
+    const r = await fetch("/vectordb/clear", { method: "POST" });
+    const d = await r.json();
+    if (d.error) { setStatus(stat, "清空失败: " + d.error, "err"); return; }
+    setStatus(stat, d.collection_existed
+      ? `✓ 向量库已清空（删除 ${d.deleted} 条记录）`
+      : "✓ 向量库本就为空", "ok");
+    resetCleanUI();
+  } catch(e) {
+    setStatus(stat, "请求失败: " + e.message, "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function showCleanResult(evt) {
+  const rawText = evt.raw_preview + (evt.raw_len > 800 ? "\n\n…（已截断，仅显示前 800 字）" : "");
+  document.getElementById("rawContent").textContent = rawText;
+  document.getElementById("rawBadge").textContent   = evt.raw_len + " 字";
+  document.getElementById("cleanedContent").textContent = evt.cleaned_content;
+  document.getElementById("cleanBadge").textContent     = evt.clean_len > 0 ? evt.clean_len + " 字" : "已过滤";
+
+  const ratio = evt.raw_len > 0 ? Math.round((1 - evt.clean_len / evt.raw_len) * 100) : 0;
+  const parts = [];
+  if (evt.chunks_stored > 0) parts.push(`已存入 ${evt.chunks_stored} 个分块`);
+  parts.push(`原始 ${evt.raw_len} 字 → 清洗后 ${evt.clean_len} 字`);
+  if (ratio > 0) parts.push(`过滤 ${ratio}%`);
+  document.getElementById("summaryText").textContent = parts.join(" · ");
+
+  document.getElementById("compareGrid").style.display   = "grid";
+  document.getElementById("ingestSummary").style.display = "flex";
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RAG 检索调试
+// ══════════════════════════════════════════════════════════════════════════════
+const SEP_PRESETS = [
+  { label: "Markdown 标题", regex: "\\n(?=#{1,6}[ \\t])", checked: true  },
+  { label: "空行 / 段落",   regex: "\\n\\n+",              checked: true  },
+  { label: "换行",          regex: "\\n",                  checked: true  },
+  { label: "中英文句末",    regex: "(?<=[。！？.!?])\\s*", checked: true  },
+  { label: "逗号 / 分号",  regex: "(?<=[，,；;])\\s*",    checked: false },
+];
+
+const sepGrid = document.getElementById("sepGrid");
+SEP_PRESETS.forEach((p, i) => {
+  const lbl = document.createElement("label");
+  lbl.className = "sep-item";
+  lbl.innerHTML = `
+    <input type="checkbox" id="sep_${i}" ${p.checked ? "checked" : ""}>
+    <div>
+      <div class="sep-name">${p.label}</div>
+      <div class="sep-regex">${p.regex.replace(/</g,"&lt;")}</div>
+    </div>`;
+  lbl.addEventListener("change", checkRebuildBadge);
+  sepGrid.appendChild(lbl);
+});
+
+[
+  ["s_cs","v_cs", v => v],
+  ["s_co","v_co", v => v],
+  ["s_tk","v_tk", v => v],
+  ["s_bw","v_bw", v => (+v).toFixed(2)],
+  ["s_bk","v_bk", v => v],
+  ["s_vk","v_vk", v => v],
+].forEach(([sid, vid, fn]) => {
+  const el = document.getElementById(sid);
+  el.addEventListener("input", () => {
+    document.getElementById(vid).textContent = fn(el.value);
+    if (sid === "s_cs" || sid === "s_co") checkRebuildBadge();
+  });
+});
+
+let builtKey = null;
+function getBuildKey() {
+  return JSON.stringify({
+    cs:   +document.getElementById("s_cs").value,
+    co:   +document.getElementById("s_co").value,
+    seps: getActiveSeparators(),
+  });
+}
+function checkRebuildBadge() {
+  const badge = document.getElementById("rebuildBadge");
+  if (builtKey === null || getBuildKey() !== builtKey) badge.classList.remove("hidden");
+  else badge.classList.add("hidden");
+}
+function getActiveSeparators() {
+  return SEP_PRESETS
+    .filter((_, i) => document.getElementById(`sep_${i}`).checked)
+    .map(p => p.regex);
+}
+
+const queryBtn   = document.getElementById("queryBtn");
+const queryInput = document.getElementById("queryInput");
+const queryStat  = document.getElementById("queryStatus");
+const resultsEl  = document.getElementById("results");
+
+function getRAGParams() {
+  return {
+    chunk_size:    +document.getElementById("s_cs").value,
+    chunk_overlap: +document.getElementById("s_co").value,
+    separators:    getActiveSeparators(),
+    top_k:         +document.getElementById("s_tk").value,
+    bm25_weight:   +document.getElementById("s_bw").value,
+    bm25_k:        +document.getElementById("s_bk").value,
+    vector_k:      +document.getElementById("s_vk").value,
+    use_reranker:  document.getElementById("s_rerank").checked,
+  };
+}
+
+async function doQuery() {
+  const q = queryInput.value.trim();
+  if (!q) return;
+  queryBtn.disabled = true;
+  setStatus(queryStat, "检索中…（首次或参数变更后会重建索引，请稍候）", "ing");
+  resultsEl.innerHTML = "";
+
+  try {
+    const res  = await fetch("/query", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ query: q, ...getRAGParams() }),
+    });
+    const data = await res.json();
+    if (data.error) { setStatus(queryStat, data.error, "err"); return; }
+
+    const { hits, rebuilt } = data;
+    builtKey = getBuildKey();
+    document.getElementById("rebuildBadge").classList.add("hidden");
+    setStatus(queryStat, `共 ${hits.length} 条结果${rebuilt ? " · 索引已重建" : ""}`, "ok");
+    renderResults(hits, getRAGParams().use_reranker);
+  } catch(e) {
+    setStatus(queryStat, "请求失败: " + e.message, "err");
+  } finally {
+    queryBtn.disabled = false;
+  }
+}
+
+function renderResults(hits, useReranker) {
+  if (!hits.length) { resultsEl.innerHTML = '<div class="empty">无匹配结果</div>'; return; }
+  const primary = h => useReranker ? (h.rerank_score ?? 0) : h.hybrid_score;
+  const max = Math.max(...hits.map(primary), 1e-9);
+
+  resultsEl.innerHTML = hits.map((h, i) => {
+    const pct = (primary(h) / max * 100).toFixed(1);
+    const tag = useReranker
+      ? `rerank ${fmt(h.rerank_score)} &nbsp; hybrid ${fmt(h.hybrid_score)}`
+      : `hybrid ${fmt(h.hybrid_score)}`;
+
+    const st       = h.source_type || "docs";
+    const stColor  = st === "wiki" ? "#d97706" : "#4f7ef7";
+    const stBg     = st === "wiki" ? "#fff7e6" : "#eef2ff";
+    const srcBadge = `<span style="background:${stBg};color:${stColor};padding:.05em .5em;border-radius:3px;font-weight:600;letter-spacing:0;font-size:.85em">${st}${h.source_weight!==undefined?` ×${fmt(h.source_weight,2)}`:""}</span>`;
+
+    const weightedPill = h.hybrid_score_raw !== undefined
+      ? `<span>hybrid <b>${fmt(h.hybrid_score)}</b><span style="color:#ccc"> ← ${fmt(h.hybrid_score_raw)}</span></span>`
+      : `<span>hybrid <b>${fmt(h.hybrid_score)}</b></span>`;
+
+    const pills = useReranker
+      ? `<span>rerank <b>${fmt(h.rerank_score)}</b></span>${weightedPill}<span>bm25 <b>${fmt(h.bm25_score)}</b></span><span>vec <b>${fmt(h.vector_score)}</b></span>`
+      : `${weightedPill}<span>bm25 <b>${fmt(h.bm25_score)}</b></span><span>vec <b>${fmt(h.vector_score)}</b></span>`;
+
+    return `
+      <div class="result-card">
+        <div class="card-header">
+          <span><span class="rank">#${i+1}</span> &nbsp; ${srcBadge} &nbsp; ${esc(h.metadata?.filename ?? "")} &nbsp; chunk ${h.metadata?.chunk_id ?? ""}</span>
+          <span>${tag}</span>
+        </div>
+        <div class="result-text">${esc(h.text)}</div>
+        <div class="score-bar"><div class="score-fill ${useReranker?"rerank":""}" style="width:${pct}%"></div></div>
+        <div class="score-pills">${pills}</div>
+      </div>`;
+  }).join("");
+}
+
+queryBtn.addEventListener("click", doQuery);
+queryInput.addEventListener("keydown", e => { if (e.key === "Enter") doQuery(); });
+
+// 记忆「参数设置」面板的开 / 合状态，避免每次提问 / 刷新被默认折叠
+(function persistParamsOpen() {
+  const KEY = "admin.paramsOpen";
+  const det = document.getElementById("paramsDetails");
+  if (!det) return;
+  const saved = localStorage.getItem(KEY);
+  if (saved !== null) det.open = saved === "1";
+  det.addEventListener("toggle", () => {
+    localStorage.setItem(KEY, det.open ? "1" : "0");
+  });
+})();
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 初始化
+// ══════════════════════════════════════════════════════════════════════════════
+loadFiles();
+</script>
+<script src="/assets/settings.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+
+# Local secrets (Fernet key for API-key encryption)
+agent_service/.secret_key
+
+# Vector store & runtime data
+agent_service/chroma_persist/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store

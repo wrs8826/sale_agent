@@ -1,0 +1,361 @@
+"""Agent 对话蓝图：QA 主图流式对话 + 反馈走清洗子图写入 wiki/。"""
+from __future__ import annotations
+
+import json
+import re
+from datetime import datetime
+
+from flask import Blueprint, Response, jsonify, request, session, stream_with_context
+
+from agent_service.graph import build_cleaning_graph, build_qa_graph
+
+from . import conversations as conv_store
+from . import services
+
+bp = Blueprint("agent", __name__)
+
+_COMPACT_CMDS = {"compact", "/compact"}
+
+_FEEDBACK_SYSTEM = (
+    "你是一个对话清洗助手。请从下方知识库问答对话中提取可作为知识库素材的事实信息。\n"
+    "\n"
+    "输入包含：\n"
+    "  · 用户评分（1-5 分）与评语\n"
+    "  · 用户与助手的多轮对话\n"
+    "\n"
+    "处理规则：\n"
+    "  · 总结对话涉及的实质性信息（项目、需求、决策、人员、联系方式、技术要点等）\n"
+    "  · 若评语指出助手回答有误或补充了正确信息，以「用户的评语」为准重写为陈述事实\n"
+    "  · 评分较低（1-2 分）通常意味助手回答不准确，更应重视评语中的纠正信息\n"
+    "  · 输出格式为简洁的陈述性段落（便于检索），不要保留「用户/助手」对话标签\n"
+    "  · 若整段对话无可保留价值，返回空字符串\n"
+    "\n"
+    "只输出清洗后的纯文本，不加任何解释或前后缀。"
+)
+
+
+def _compact_response(conversation_id: str, user_id: int, level: int) -> Response:
+    """SSE 包装：跑一次压缩并通过 compact_done 事件回报结果。
+
+    level=1 → keep_tail=LEVEL1_KEEP_TAIL_PAIRS（手动）
+    level=2 → keep_tail=LEVEL2_KEEP_TAIL_PAIRS（自动，目前由内联逻辑直接调用）
+    """
+    keep = (
+        conv_store.LEVEL1_KEEP_TAIL_PAIRS
+        if level == 1 else conv_store.LEVEL2_KEEP_TAIL_PAIRS
+    )
+
+    def gen():
+        try:
+            yield f"data: {json.dumps({'type':'status','message':'正在压缩对话历史…'}, ensure_ascii=False)}\n\n"
+            cleaner_cfg = services.load_cleaner_settings()
+            if not cleaner_cfg["api_key"]:
+                yield f"data: {json.dumps({'type':'error','message':'未配置 API Key'}, ensure_ascii=False)}\n\n"
+                return
+            res = conv_store.compact_conversation(conversation_id, user_id, cleaner_cfg, keep_tail_pairs=keep)
+            if res.get("unchanged"):
+                payload = {"type": "compact_done", "level": level, "unchanged": True, "reason": res.get("reason", "")}
+            elif res.get("error"):
+                payload = {"type": "error", "message": res["error"]}
+            else:
+                payload = {
+                    "type": "compact_done",
+                    "level": level,
+                    "compacted_count": res["compacted_count"],
+                    "kept_count": res["kept_count"],
+                    "summary_preview": (res["summary"] or "")[:200],
+                }
+            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'type':'error','message':str(exc)}, ensure_ascii=False)}\n\n"
+
+    return Response(
+        stream_with_context(gen()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@bp.route("/agent/chat", methods=["POST"])
+def agent_chat():
+    """SSE 流式端点：驱动 QA 主图，节点自带 tool_*/token/done 事件。"""
+    data = request.get_json(silent=True) or {}
+    message = data.get("message", "").strip()
+    top_k = int(data.get("top_k", 5))
+    conversation_id = (data.get("conversation_id") or "").strip()
+
+    if not message:
+        return jsonify({"error": "消息不能为空"}), 400
+
+    # 获取当前登录用户 ID（未登录时拒绝持久化但允许匿名对话）
+    user_id: int | None = session.get("user_id")
+    if user_id is not None:
+        user_id = int(user_id)
+    is_admin = session.get("role") == "admin"
+
+    # ── 一级压缩：用户输入 compact / /compact 命令 ─────────────────────────
+    if message.lower() in _COMPACT_CMDS:
+        if not conversation_id:
+            return jsonify({"error": "compact 命令需要在会话内使用"}), 400
+        if user_id is None:
+            return jsonify({"error": "未登录，无法执行压缩"}), 401
+        # 验证会话归属
+        conv = (conv_store.find_conversation(conversation_id) if is_admin
+                else conv_store.load_conversation(conversation_id, user_id))
+        if conv is None:
+            return jsonify({"error": "会话不存在或已被删除"}), 404
+        owner_id = int(conv.get("user_id") or user_id)
+        return _compact_response(conversation_id, owner_id, level=1)
+
+    # conversation_id 提供时，以服务端持久化的历史为准（多会话隔离的关键）
+    if conversation_id and user_id is not None:
+        conv = (conv_store.find_conversation(conversation_id) if is_admin
+                else conv_store.load_conversation(conversation_id, user_id))
+        if conv is None:
+            return jsonify({"error": "会话不存在或已被删除"}), 404
+        if not is_admin and conv.get("user_id") != user_id:
+            return jsonify({"error": "无权访问该会话"}), 403
+        # admin 只能查看他人会话，不能往里发消息
+        if is_admin and conv.get("user_id") != user_id:
+            return jsonify({"error": "管理员只能查看用户对话历史，不能代用户发送消息"}), 403
+        owner_id = int(conv.get("user_id") or user_id)
+        history = conv_store.get_history(conversation_id, owner_id)
+    elif user_id is not None:
+        # 未提供 conversation_id 且已登录 → 自动创建新会话
+        now = conv_store._now()
+        new_conv = {
+            "id": conv_store.new_id(),
+            "user_id": user_id,
+            "title": conv_store._DEFAULT_TITLE,
+            "created_at": now,
+            "updated_at": now,
+            "summary": "",
+            "compact_at": 0,
+            "messages": [],
+        }
+        conv_store.save_conversation(new_conv)
+        conversation_id = new_conv["id"]
+        owner_id = user_id
+        history = []
+    else:
+        # 未登录匿名对话：不持久化
+        owner_id = None
+        history = data.get("history", []) or []
+
+    chat_cfg = services.load_chat_settings()
+    if not chat_cfg["api_key"]:
+        return jsonify({"error": "未配置 Chat API Key，请在右侧设置中填写"}), 400
+
+    # 首次对话也能自动构建 RAG（不依赖管理员先跑 /query）
+    try:
+        cfg = services.load_config()
+        rag, _ = services.get_rag(
+            cfg.chunk_size,
+            cfg.chunk_overlap,
+            list(cfg.separators) if cfg.separators else None,
+        )
+    except Exception as e:
+        return jsonify({"error": f"索引构建失败: {e}"}), 500
+
+    def rag_fn(q: str, k: int):
+        cur = services.get_current_rag()
+        if cur is None:
+            return []
+        try:
+            return cur.search(q, top_k=k)
+        except Exception:
+            return []
+
+    use_rag = rag is not None
+
+    try:
+        graph = build_qa_graph()
+    except Exception as e:
+        return jsonify({"error": f"QA 图初始化失败: {e}"}), 500
+
+    state = {
+        "query": message,
+        "history": history,
+        "chat_cfg": chat_cfg,
+        "rag_fn": rag_fn if use_rag else None,
+        "top_k": top_k,
+        "score_threshold": services.load_rag_threshold(),
+    }
+
+    def generate():
+        full_text = ""
+
+        # ── 二级压缩：估算 token，超 80% 上限自动压缩历史 ──────────────────
+        if conversation_id and owner_id is not None:
+            threshold = int(conv_store.MAX_CONTEXT_TOKENS * conv_store.COMPACT_THRESHOLD)
+            tokens = conv_store.estimate_history_tokens(state["history"]) + conv_store.estimate_tokens(message)
+            if tokens > threshold:
+                yield (
+                    "data: " + json.dumps({
+                        "type": "status",
+                        "message": f"对话历史约 {tokens} tokens，超过 {int(conv_store.COMPACT_THRESHOLD*100)}% 阈值，正在自动压缩…",
+                    }, ensure_ascii=False) + "\n\n"
+                )
+                cleaner_cfg = services.load_cleaner_settings()
+                res = conv_store.compact_conversation(
+                    conversation_id, owner_id, cleaner_cfg,
+                    keep_tail_pairs=conv_store.LEVEL2_KEEP_TAIL_PAIRS,
+                )
+                if res.get("ok"):
+                    new_history = conv_store.get_history(conversation_id, owner_id)
+                    state["history"] = new_history
+                    yield (
+                        "data: " + json.dumps({
+                            "type": "auto_compacted",
+                            "level": 2,
+                            "compacted_count": res["compacted_count"],
+                            "kept_count": res["kept_count"],
+                            "summary_preview": res["summary"][:200],
+                            "tokens_before": tokens,
+                            "tokens_after": conv_store.estimate_history_tokens(new_history) + conv_store.estimate_tokens(message),
+                        }, ensure_ascii=False) + "\n\n"
+                    )
+                elif res.get("unchanged"):
+                    pass  # 太短无法压缩，继续即可
+                else:
+                    yield (
+                        "data: " + json.dumps({
+                            "type": "warning",
+                            "message": f"自动压缩失败：{res.get('error')}，继续使用原历史",
+                        }, ensure_ascii=False) + "\n\n"
+                    )
+
+        try:
+            for event in graph.stream(state, stream_mode="custom"):
+                # stream_mode="custom" 时 event 就是节点 writer 推出的 dict
+                if event.get("type") == "done":
+                    full_text = event.get("full_text") or ""
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            err = {"type": "error", "message": str(exc)}
+            yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+            return
+
+        # 持久化：仅 conversation_id 有效且 done 拿到回复时落盘
+        if conversation_id and owner_id is not None and full_text:
+            try:
+                updated = conv_store.append_turn(conversation_id, owner_id, message, full_text)
+                if updated is not None:
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "type": "conversation_saved",
+                                "conversation_id": conversation_id,
+                                "title": updated.get("title"),
+                                "updated_at": updated.get("updated_at"),
+                                "message_count": len(updated.get("messages") or []),
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n\n"
+                    )
+            except Exception as exc:
+                yield f"data: {json.dumps({'type':'error','message':f'会话落盘失败: {exc}'}, ensure_ascii=False)}\n\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@bp.route("/feedback", methods=["POST"])
+def feedback():
+    """评分+评语 → 清洗子图（feedback prompt）→ 写 wiki/ → 失效 RAG 缓存。"""
+    data = request.get_json(silent=True) or {}
+    rating = int(data.get("rating", 0))
+    comment = (data.get("comment") or "").strip()
+    history = data.get("history", [])
+    conversation_id = (data.get("conversation_id") or "").strip()
+    # 从 session 读取用户名，未登录时用 anonymous
+    username = re.sub(r"[^\w]", "_", session.get("username") or "anonymous")
+
+    if not history:
+        return jsonify({"error": "对话历史为空"}), 400
+    if rating < 1 or rating > 5:
+        return jsonify({"error": "评分必须在 1-5 之间"}), 400
+
+    def generate():
+        try:
+            yield f"data: {json.dumps({'type':'status','message':'整理对话历史…'}, ensure_ascii=False)}\n\n"
+            conv_text = "\n".join(
+                f"{'用户' if m.get('role') == 'user' else '助手'}：{m.get('content','')}"
+                for m in history
+            )
+            llm_input = (
+                f"用户评分：{rating}/5\n"
+                f"用户评语：{comment or '（未填写）'}\n\n"
+                f"对话记录：\n{conv_text}"
+            )
+
+            cleaner_cfg = services.load_cleaner_settings()
+            if not cleaner_cfg["api_key"]:
+                yield f"data: {json.dumps({'type':'error','message':'未配置 API Key'}, ensure_ascii=False)}\n\n"
+                return
+            msg = f"调用 {cleaner_cfg['model_name']} 总结清洗（对话 {len(conv_text)} 字）…"
+            yield f"data: {json.dumps({'type':'status','message':msg}, ensure_ascii=False)}\n\n"
+
+            out = build_cleaning_graph().invoke({
+                "raw_text": llm_input,
+                "system_prompt": _FEEDBACK_SYSTEM,
+                "cleaner_cfg": cleaner_cfg,
+            })
+            if out.get("error"):
+                yield f"data: {json.dumps({'type':'error','message':out['error']}, ensure_ascii=False)}\n\n"
+                return
+            cleaned = (out.get("cleaned_text") or "").strip()
+
+            if not cleaned:
+                result = {
+                    "type": "result",
+                    "filename": "",
+                    "cleaned_preview": "",
+                    "raw_len": len(conv_text),
+                    "clean_len": 0,
+                    "message": "本轮对话无可保留内容，未写入",
+                }
+                yield f"data: {json.dumps(result, ensure_ascii=False)}\n\n"
+                return
+
+            wiki_dir = services.get_wiki_dir()
+            yield f"data: {json.dumps({'type':'status','message':f'写入 wiki/ …'}, ensure_ascii=False)}\n\n"
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            conv_short = conversation_id[:8] if conversation_id else "noconv"
+            filename = f"feedback_{username}_{conv_short}_{ts}_{rating}star.txt"
+            target = wiki_dir / filename
+            header = (
+                f"# 对话反馈摘要\n"
+                f"# 用户: {session.get('username') or 'anonymous'}\n"
+                f"# 会话: {conversation_id or '（无会话）'}\n"
+                f"# 评分: {rating}/5\n"
+                f"# 评语: {comment or '（未填写）'}\n"
+                f"# 时间: {ts}\n\n"
+            )
+            target.write_text(header + cleaned, encoding="utf-8")
+
+            services.invalidate_rag()
+
+            result = {
+                "type": "result",
+                "filename": filename,
+                "filepath": str(target),
+                "cleaned_preview": cleaned[:400],
+                "raw_len": len(conv_text),
+                "clean_len": len(cleaned),
+            }
+            yield f"data: {json.dumps(result, ensure_ascii=False)}\n\n"
+
+        except Exception as exc:
+            yield f"data: {json.dumps({'type':'error','message':str(exc)}, ensure_ascii=False)}\n\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
