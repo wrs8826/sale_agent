@@ -33,7 +33,8 @@ F:/销售agent/
 
 | 路径 | 职责 |
 |---|---|
-| `__init__.py` | 暴露绝对路径常量：`CONFIG_PATH` / `DOCS_DIR` / `WIKI_DIR`（默认值） / `CHROMA_DIR` / `CONVERSATIONS_DIR` |
+| `__init__.py` | 暴露绝对路径常量：`CONFIG_PATH` / `DOCS_DIR` / `WIKI_DIR` / `CHROMA_DIR` / `CONVERSATIONS_DIR` / `SKILLS_ROOT` |
+| `skill_loader.py` | 解析 `skills/*/SKILL.md`；`detect_skill(query)` 关键词匹配；`all_refs_dirs()` 返回所有 references 目录 |
 | `config.yaml` | 配置入口；分块/检索参数 + chat/cleaner/reranker/embedding 四段 API 配置 + source_weights |
 | `security.py` | Fernet 加密 API key（密钥落 `.secret_key`） |
 | `rag/simple_rag.py` | `DocumentChunker` / `EmbedderFactory` / `HybridRetriever` / `DashScopeReranker` / `RAGConfig` |
@@ -42,7 +43,7 @@ F:/销售agent/
 | `graph/qa/` | QA 主图：`extract_keywords → retrieve? → generate → END`，节点用 `get_stream_writer` 推 SSE |
 | `mcp/lark_mcp.json` | 飞书凭证（顶层 `app_id/app_secret/verification_token/encrypt_key`）+ MCP 服务器配置（`mcpServers`） |
 | `mcp/mcp_manager.py` | `MCPManager` 单例：后台 asyncio 线程持久持有飞书 MCP 上下文，状态回调，同步桥接 |
-| `mcp/lark_bot.py` | `LarkBot` 单例：`lark-oapi` SDK 长连接接收飞书消息，调 QA 图生成回复，通过 SDK 发回飞书；无需公网域名 |
+| `mcp/lark_bot.py` | `LarkBot` 单例：`lark-oapi` SDK 长连接接收飞书消息；`_query()` 入口调 `detect_skill()` 注入 skill 提示词，两条路径（MCP Agent / RAG QA 图）均感知 skill |
 | `mcp/lark_history.py` | 飞书机器人对话历史持久化：`load_history` / `append_turn` / `clear_history`；文件存 `agent_service/lark_conversations/` |
 
 ### `api/`
@@ -68,10 +69,8 @@ F:/销售agent/
 |---|---|
 | `login.html` | **用户端登录 + 注册**（tab 切换）；注册字段：用户名/密码/确认密码/手机号/部门 |
 | `user.html` | 用户端：**三页侧栏布局**（上传资料 / 智能问答 / 系统设置），260px 固定左侧导航，含会话侧栏、自动压缩、反馈、四段模型设置 |
-| `admin/login.html` | **管理员专属登录页**（调用 `/auth/admin-login`，只允许 admin 角色） |
-| `admin/knowledge.html` | 知识库管理 + 文档上传 + RAG 检索调试 |
-| `admin/chat.html` | 完整功能 chat（含 top_k 滑块） |
-| `admin/users.html` | 用户管理：列表 / 搜索 / 编辑 / 封禁 / 删除 |
+| `login.html` | **用户端登录 + 注册**（tab 切换）；注册字段：用户名/密码/确认密码/手机号/部门 |
+| `user.html` | 用户端：三页侧栏布局（上传资料 / 智能问答 / 系统设置） |
 | `assets/common.css` | 三页共享样式（header / panel / tabs / 设置抽屉 / 状态圆点） |
 | `assets/settings.js` | 共享设置抽屉 + `/settings/test` 调用 |
 

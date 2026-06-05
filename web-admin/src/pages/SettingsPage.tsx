@@ -39,7 +39,6 @@ const DEFAULT: AllSettings = {
   wiki:     { path: '', sync_interval: '手动' },
 }
 
-const maskKey = (k: string) => k ? `${k.slice(0, 4)}${'*'.repeat(8)}${k.slice(-4)}` : ''
 
 const PasswordInput: React.FC<{ value: string; onChange: (v: string) => void; placeholder?: string; disabled?: boolean }> =
   ({ value, onChange, placeholder, disabled }) => {

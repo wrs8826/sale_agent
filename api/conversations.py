@@ -39,6 +39,7 @@ from flask import Blueprint, jsonify, request, session
 
 from agent_service import CONVERSATIONS_DIR
 from agent_service.graph import build_cleaning_graph
+from . import conv_stats
 
 bp = Blueprint("conversations", __name__)
 
@@ -376,7 +377,12 @@ def get_conversation(cid: str):
         return jsonify({"error": "会话不存在"}), 404
     if not _check_ownership(conv):
         return jsonify({"error": "无权访问该会话"}), 403
-    return jsonify(conv)
+
+    # 附加压缩次数（从 DB 读取，出错时默认 0，不影响主流程）
+    owner = conv.get("user_id") or uid
+    payload = dict(conv)
+    payload["auto_compact_count"] = conv_stats.get_compact_count(owner, cid)
+    return jsonify(payload)
 
 
 @bp.route("/conversations/<cid>", methods=["PATCH"])

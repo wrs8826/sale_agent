@@ -19,6 +19,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 from flask import Flask, redirect, send_from_directory, session
 
 from agent_service import CONVERSATIONS_DIR, DOCS_DIR, WIKI_DIR
+from api.session_store import configure_session
+from api.conv_stats import ensure_table as ensure_stats_table
 from api.agent import bp as agent_bp
 from api.auth import bp as auth_bp
 from api.conversations import bp as conversations_bp
@@ -35,11 +37,12 @@ WEB_DIR = _PROJECT_ROOT / "web"
 def create_app() -> Flask:
     app = Flask(__name__, static_folder=None)
     app.secret_key = os.getenv("USER_SECRET_KEY", "user-app-secret-key-change-in-prod")
-    app.config["PERMANENT_SESSION_LIFETIME"] = 86400 * 7
+    configure_session(app, key_prefix="user_sess:")
 
     DOCS_DIR.mkdir(exist_ok=True)
     WIKI_DIR.mkdir(exist_ok=True)
     CONVERSATIONS_DIR.mkdir(exist_ok=True)
+    ensure_stats_table()
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(agent_bp)

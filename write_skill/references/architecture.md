@@ -4,10 +4,15 @@
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│  web/  (浏览器)                                            │
+│  web/  (用户端浏览器)                                      │
 │  ── vanilla JS、SSE 消费、settings 抽屉                    │
 │  ── 用户端：login.html / user.html                         │
-│  ── 管理员端：admin/login.html / admin/knowledge / chat    │
+│  ── assets/：common.css / settings.js（用户端共享）        │
+├────────────────────────────────────────────────────────────┤
+│  web-admin/  (管理员端 React SPA)                          │
+│  ── React + TypeScript + Tailwind + Vite                   │
+│  ── 开发：port 5173（代理 API → :5002）                    │
+│  ── 生产：npm run build → dist/ → Flask 5002 静态托管      │
 └────────────────────────────────────────────────────────────┘
                             ↓ HTTP / SSE
 ┌────────────────────────────────────────────────────────────┐
@@ -20,6 +25,11 @@
 ┌────────────────────────────────────────────────────────────┐
 │  agent_service/  (业务核心)                                │
 │  ── RAG、LangGraph 图、加密、配置                          │
+│  ── skill_loader.py：解析 skills/ 目录，关键词匹配         │
+├────────────────────────────────────────────────────────────┤
+│  skills/  (技能包，与项目根同级)                           │
+│  ── <技能名>/SKILL.md：frontmatter(name/desc) + 系统提示   │
+│  ── <技能名>/references/*.md：RAG 索引的政策文档           │
 └────────────────────────────────────────────────────────────┘
                             ↓ TCP
 ┌────────────────────────────────────────────────────────────┐
@@ -42,18 +52,59 @@
       |                        |
  app_user.py             app_admin.py
       |                        |
-  / → login.html          / → admin/login.html
-  /user → user.html       /admin/* → knowledge/chat
+  / → login.html          /* → web-admin/dist/index.html (SPA)
+  /user → user.html        /assets/* → web-admin/dist/assets/
       |                        |
  /auth/login              /auth/admin-login
  （接受 user + admin）    （仅接受 admin）
       |                        |
       └──────── 共享蓝图 ───────┘
        auth / agent / conversations
-       knowledge / settings
+       knowledge / settings / users
 ```
 
 **session 隔离原理**：两端使用不同的 `secret_key`（`USER_SECRET_KEY` / `ADMIN_SECRET_KEY`），cookie 名相同但签名不兼容，即使用同一浏览器访问两端，session 也不互通。
+
+## Redis Session 缓存（`api/session_store.py`）
+
+Session 数据存储在 Redis，实现空闲超时退出 + 短期免登录。
+
+**配置参数（环境变量）：**
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `REDIS_HOST` | `127.0.0.1` | Redis 地址 |
+| `REDIS_PORT` | `6379` | Redis 端口 |
+| `REDIS_PASSWORD` | `123456` | Redis 密码 |
+| `REDIS_DB` | `0` | Redis 数据库编号 |
+| `SESSION_IDLE_MINUTES` | `30` | 空闲超时分钟数 |
+
+**工作原理：**
+
+```
+用户发起请求
+     │
+     ▼
+Flask 从 Redis 读 session（按 cookie 中的 session ID 查找）
+     │ 找不到（超时或第一次）     │ 找到
+     ▼                           ▼
+session.get("user_id") = None  session.get("user_id") = 正常值
+     │                           │
+     ▼                           ▼
+路由返回 401 / 跳转 /          正常处理请求
+     │                           │
+     ▼                           ▼
+前端 fetch 拦截器                响应时刷新 Redis TTL（滑动窗口）
+window.location.href = '/'
+```
+
+**Redis key 区分：**
+- 用户端：`user_sess:<session_id>`
+- 管理端：`admin_sess:<session_id>`
+
+**降级行为**：Redis 不可用时自动回退为 Flask 原生 cookie session（`SESSION_IDLE_MINUTES` 仍然作为 `PERMANENT_SESSION_LIFETIME`）。
+
+**前端 401 拦截**：所有页面（`user.html` / `knowledge.html` / `chat.html` / `users.html`）在 `<script>` 块最顶部通过 IIFE 包装 `window.fetch`，统一拦截 401 响应后跳转登录页。
 
 ## 认证流程
 
@@ -253,6 +304,8 @@ app 启动 → lark_bot.start()
     ↓ lark.ws.Client.start()  ← 阻塞，SDK 自动重连
     ↓ 收到消息 → 开新线程
         ↓ 提取 open_id（sender）+ chat_id（message）
+        ↓ content == "clear"?
+            是 → _save_and_clear()  ← 归档 wiki + 清历史，回复确认后 return
         ↓ lark_history.load_history(open_id, chat_id)  ← 加载历史
         ↓ mcp_manager 就绪？
             是 → mcp_manager.run_agent_sync(text, chat_cfg, history)  ← ReAct Agent 可调飞书工具
@@ -283,6 +336,103 @@ app 启动 → lark_bot.start()
 - **滚动窗口**：只保留最近 `MAX_TURNS=10` 轮（20 条消息），超出自动截断旧消息
 - **原子写**：tmp → replace，防文件半写损坏
 - **读写失败不阻塞回复**：异常只打印警告，不中断消息处理流程
+
+### 飞书 OAuth 用户授权
+
+用户在飞书聊天中发送 `auth` 触发 OAuth 流程，获取个人 user_access_token：
+
+```
+用户发 "auth"
+    ↓ lark_bot._send_auth_link()
+    ↓ 读取 lark_mcp.json 中 oauth_redirect_uri + app_id
+    ↓ lark_oauth.get_auth_url() 生成授权 URL
+    ↓ bot 以文本消息发送链接给用户
+
+用户点击链接 → 飞书授权页 → 同意
+    ↓ 飞书回调 GET /lark/oauth/callback?code=xxx&state=<open_id>
+    ↓ lark_oauth.exchange_code() 换取 user_access_token
+    ↓ lark_token_store.save(open_id, token_data) 持久化
+    ↓ 返回成功 HTML 页面（用户浏览器可见）
+
+后续对话
+    ↓ lark_token_store.get_valid_token(open_id) 取 token（自动续签）
+    ↓ lark_user_tools.build_user_tools(token) 创建用户级工具
+    ↓ mcp_manager.run_agent_sync(..., extra_tools=[...]) 合并注入
+```
+
+**相关文件**：
+
+| 文件 | 职责 |
+|---|---|
+| `agent_service/mcp/lark_oauth.py` | OAuth URL 生成、授权码换 token、token 续签 |
+| `agent_service/mcp/lark_token_store.py` | user_access_token 持久化（`lark_tokens/`），自动刷新 |
+| `agent_service/mcp/lark_user_tools.py` | 用户级 LangChain 工具工厂（list_contacts / search_contacts） |
+| `api/lark_agent.py` | `/lark/oauth/callback` 回调路由 |
+
+**指令列表**：
+
+| 指令 | 效果 |
+|---|---|
+| `auth` | 发送 OAuth 授权链接 |
+| `deauth` | 清除本地 user token，撤销授权 |
+| `clear` | 归档对话历史到 wiki 并清除 |
+
+**配置**（`lark_mcp.json`）：
+- `oauth_redirect_uri`：OAuth 回调地址，需在飞书开发者后台同步填写，且必须可公开访问。
+
+**飞书后台需开通的权限**：`contact:user.base:readonly`（获取用户基本信息）
+
+### 飞书 Tenant 通讯录工具（`lark_tenant_tools.py`）
+
+不依赖 OAuth 用户授权，使用 app_access_token 直接调飞书 REST API，绕过 lark-mcp 对 contact 系列工具强制 user token 的限制。每次 `_query()` 调用时由 `lark_bot` 动态构建并注入到 `mcp_manager.run_agent_sync(extra_tools=...)`。
+
+**提供工具**：`list_contacts` / `search_contacts` / `list_departments`
+
+**关键实现细节**：
+
+1. **`department_id_type` 必须用 `open_department_id`**
+   - `contact/v3/scopes` 请求时加 `department_id_type=open_department_id`，返回的 dept_id 格式为 `od-xxx`
+   - 调 `contact/v3/users` 时同样加 `department_id_type=open_department_id`
+   - 不加或用默认的 `department_id` 类型会收到 99992357 错误（Invalid department_id）
+
+2. **app_access_token 本地缓存**（`_token_cache`）
+   - 2 小时有效期，提前 5 分钟刷新
+   - 多线程安全（`threading.Lock`）
+
+3. **查询降级策略**
+   ```
+   list_contacts(department_id="")
+       ↓ 无 department_id → 调 contact/v3/scopes（open_department_id 类型）
+       ↓ 有 dept_ids → 查根部门用户列表
+       ↓ 无 dept_ids 但有 user_ids → batch 查用户详情
+       ↓ 都没有 → 返回提示
+   ```
+
+4. **飞书管理后台必须配置**：工作台 → 应用管理 → 权限管理 → 通讯录授权 → 全员（否则只能查到管理员手动勾选的用户）
+
+**System prompt 关键规则**（`mcp_manager._invoke_agent`）：
+- 明确禁止 LLM 使用 `contact_v3_user_batchGetId` 查通讯录列表（该工具仅用于已知 ID 反查）
+- 强制 LLM 优先使用 `list_contacts` / `search_contacts` / `list_departments`
+
+### 飞书 `clear` 归档指令
+
+用户在飞书聊天中发送 `clear`（大小写不限）时触发：
+
+```
+用户发 "clear"
+    ↓ lark_history.load_history()  ← 读取当前会话历史
+    ↓ 无历史 → 回复"📭 当前没有可保存的对话历史"，结束
+    ↓ 拼接对话文本，构造 llm_input（rating=5，评语=飞书机器人手动归档）
+    ↓ build_cleaning_graph().invoke({raw_text, _FEEDBACK_SYSTEM, cleaner_cfg})
+    ↓ cleaned 非空 → 写 wiki/feedback_<uid>_lark_<ts>_5star.txt
+    ↓ services.invalidate_rag()
+    ↓ lark_history.clear_history()  ← 删除历史文件
+    ↓ 回复归档结果
+```
+
+- 复用 web 端 `/feedback` 相同的清洗 prompt（`_FEEDBACK_SYSTEM`）和子图
+- `clear_history` 无论 cleaned 是否为空都会执行（无价值对话也清除）
+- 归档文件命名：`feedback_<open_id[:20]>_lark_<ts>_5star.txt`
 
 ### 约定
 

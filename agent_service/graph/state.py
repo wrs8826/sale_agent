@@ -29,6 +29,8 @@ class ChatState(TypedDict, total=False):
     rag_fn: Optional[Callable]  # (query, k) → List[hit]；None 时跳过检索
     top_k: int                  # 检索片段数
     score_threshold: float      # 低于该分时忽略命中，改用会话上下文兜底
+    skill_system_prompt: Optional[str]  # skill 匹配时覆盖默认生成提示词
+    tool_results: Optional[str]         # call_tools_node 执行工具后的结果摘要
     # ── 节点产出 ────────────────────────────────────────────────────────────
     keywords: str               # extract 节点写
     hits: List[Dict[str, Any]]  # retrieve 节点写

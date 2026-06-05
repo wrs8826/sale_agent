@@ -23,7 +23,7 @@ const LoginPage: React.FC = () => {
       })
       const data = await r.json()
       if (!r.ok) { setError(data.error || '登录失败'); return }
-      setAuth({ username: data.username, role: data.role })
+      setAuth({ user_id: data.user_id, username: data.username, role: data.role })
       showToast(`欢迎回来，${data.username}`)
     } catch {
       setError('网络错误，请检查后端服务是否启动')

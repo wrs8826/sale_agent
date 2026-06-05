@@ -1,55 +1,90 @@
-# RAG 配置文件示例
-# 复制为 config.yaml 后按注释填写，API Key 建议通过管理员端「系统设置」写入（自动加密）
+# RAG 配置文件
+# 可配置 embedding 模型、向量存储持久化、检索超参数、文档加载路径等。
 
+# 向量数据库持久化目录，Chroma 将在此路径中保存索引数据。
+# 相对路径以 config.yaml 所在目录（agent_service/）为基准解析。
 persist_directory: "chroma_persist"
+
+# Chroma 向量集合名，用于区分不同 RAG 实例。
 collection_name: "simple_rag"
+
+# 嵌入模型名称，可用于 sentence-transformers 或 OpenAI 等外部提供者。
 embedder_name: "text-embedding-v4"
+
+# 是否优先使用本地 sentence-transformers 模型进行嵌入。
+# 如果设置为 false，将回退到 SimpleEmbedder（TF-IDF）。
 use_sentence_transformers: true
+
+# 外部嵌入提供者名称。
+# 阿里云百炼（Dashscope）提供 OpenAI 兼容接口，配合下方 api_base 使用 "openai" 即可，
+# 这样才能使用 text-embedding-v4 这类兼容模式下的模型名。
 api_provider: "openai"
-api_key: ""       # 旧版兜底字段，建议留空，使用下方 embedding.api_key
-api_base: ""      # 旧版兜底字段，建议留空，使用下方 embedding.base_url
+
+# 外部提供者 API Key：填写你的 API Key，或留空从环境变量读取。
+#   export OPENAI_API_KEY="你的百炼Key"   (provider=openai 兼容模式)
+#   export DASHSCOPE_API_KEY="你的百炼Key" (provider=dashscope 原生模式)
+api_key: ""
+
+# 外部提供者 Base URL，仅在使用 OpenAI 兼容服务（例如阿里云百炼 Dashscope）时需要。
+api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+# 外部文档加载路径，可以是相对于本文件目录的文件夹或文件。
 source_path: "docs"
 
+# 文档分块长度，超过该长度会拆分成多段。
 chunk_size: 400
+
+# 分块重叠长度，用于减少分块边界信息丢失。
 chunk_overlap: 100
 
+# 支持加载的文档后缀列表。
 allowed_extensions:
   - ".txt"
   - ".md"
   - ".rst"
   - ".html"
 
+# 返回的最终结果数。
 top_k: 5
+
+# BM25 检索时使用的候选文档数量，通常大于 top_k。
 bm25_k: 8
+
+# 向量检索时使用的候选文档数量，通常大于 top_k。
 vector_k: 8
+
+# BM25 与向量检索得分融合权重，0.0 表示只使用向量检索，1.0 表示只使用 BM25。
 bm25_weight: 0.5
+
+# 是否在启动时重建/重置已有向量存储。设置为 true 会删除并重新创建集合。
 reset_vector_store: false
 
-# ─── API 配置 ────────────────────────────────────────────────────────────────
+# ─── API 配置（chat / cleaner / reranker）─────────────────────────────────────
 # api_key 字段支持加密存储：以 "enc:" 开头的为 Fernet 密文（由 settings 接口写入）。
-# cleaner / reranker / embedding 字段留空（""）表示继承 chat 段。
+# cleaner / reranker 字段留空（"" 或 null）表示继承 chat。
 chat:
-  api_key: ""           # 必填：你的大模型 API Key（支持 OpenAI 兼容接口）
-  base_url: ""          # 示例（阿里云百炼）：https://dashscope.aliyuncs.com/compatible-mode/v1
-  model_name: ""        # 示例：qwen3-max / gpt-4o / deepseek-chat
-  rag_score_threshold: 0.3   # 知识库命中分数低于此值时，改用对话上下文回答
+  api_key: ""
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model_name: "qwen-plus-2025-07-28"
+  rag_score_threshold: 0.3
 
 cleaner:
-  api_key: ""           # 留空则继承 chat
+  api_key: ""
   base_url: ""
-  model_name: ""        # 留空则继承 chat（可单独指定更便宜的模型）
+  model_name: ""
 
 reranker:
-  api_key: ""           # 留空则继承 chat
+  api_key: ""
   base_url: ""
-  model_name: ""        # 示例：gte-rerank-v2
+  model_name: "gte-rerank-v2"
 
 embedding:
-  api_key: ""           # 留空则继承 chat
+  api_key: ""
   base_url: ""
-  model_name: ""        # 示例：text-embedding-v4 / text-embedding-3-small
+  model_name: "text-embedding-v4"
 
-# ─── 数据源权重 ───────────────────────────────────────────────────────────────
+# ─── 数据源权重 ────────────────────────────────────────────────────────────────
 source_weights:
-  docs: 1.0    # agent_service/docs/ 下的文档（主知识源）
-  wiki: 0.7    # agent_service/wiki/ 下的反馈沉淀（置信度略低）
+  docs: 1.0
+  wiki: 0.7
+  skill: 1.0

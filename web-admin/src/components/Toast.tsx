@@ -1,5 +1,5 @@
 import React from 'react'
-import { CheckCircle, XCircle, AlertTriangle, X } from 'lucide-react'
+import { CheckCircle, XCircle, AlertTriangle } from 'lucide-react'
 import type { ToastItem } from '../types'
 
 const icons = {

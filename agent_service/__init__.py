@@ -8,19 +8,25 @@
 from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = PACKAGE_ROOT.parent
 CONFIG_PATH = PACKAGE_ROOT / "config.yaml"
 DOCS_DIR = PACKAGE_ROOT / "docs"
 WIKI_DIR = PACKAGE_ROOT / "wiki"
 CHROMA_DIR = PACKAGE_ROOT / "chroma_persist"
 CONVERSATIONS_DIR = PACKAGE_ROOT / "conversations"
 LARK_CONVERSATIONS_DIR = PACKAGE_ROOT / "lark_conversations"
+LARK_TOKENS_DIR = PACKAGE_ROOT / "lark_tokens"
+SKILLS_ROOT = PROJECT_ROOT / "skills"
 
 __all__ = [
     "PACKAGE_ROOT",
+    "PROJECT_ROOT",
     "CONFIG_PATH",
     "DOCS_DIR",
     "WIKI_DIR",
     "CHROMA_DIR",
     "CONVERSATIONS_DIR",
     "LARK_CONVERSATIONS_DIR",
+    "LARK_TOKENS_DIR",
+    "SKILLS_ROOT",
 ]

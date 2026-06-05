@@ -785,6 +785,27 @@
 <script>
 'use strict';
 
+/* ── 全局 401 拦截：session 过期自动跳转登录 ────────────────────── */
+(function () {
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = async function (...args) {
+    let response;
+    try {
+      response = await _origFetch(...args);
+    } catch (err) {
+      throw err;
+    }
+    if (response.status === 401) {
+      // 克隆一份供调用方使用（body 只能消费一次）
+      const clone = response.clone();
+      // 延迟跳转，避免打断当前微任务队列
+      setTimeout(() => { window.location.href = '/'; }, 0);
+      return clone;
+    }
+    return response;
+  };
+})();
+
 /* ── 工具 ──────────────────────────────────────────────────────── */
 function toast(msg, type = 'success') {
   const el = document.createElement('div');
@@ -997,6 +1018,51 @@ let chatHist  = [];     // [{role,content}] 用于 feedback
 let rating    = 0;
 let streaming = false;
 
+// ── 按会话 ID 隔离的压缩计数器 ────────────────────────────────────────────
+// key = convId（字符串），value = 该会话的累计自动压缩次数（从数据库恢复）
+// 用字典而非单一全局变量，彻底避免多会话之间共享/污染
+const _compactCounts = {};
+
+function _getCount()    { return convId ? (_compactCounts[convId] || 0) : 0; }
+function _setCount(n)   { if (convId) _compactCounts[convId] = n; }
+function _incCount()    { if (convId) _compactCounts[convId] = _getCount() + 1; }
+
+/* 在消息区底部显示/更新"建议新开对话"提示。
+   若 tip 已存在则只更新次数文字，不重复插入。
+   计数从数据库恢复，页面刷新后仍正确（DB 为权威值）。 */
+function _showCompactTip() {
+  const count = _getCount();
+  const label =
+    '该对话已自动压缩 <b>' + count + ' 次</b>，长上下文可能影响回答质量。' +
+    '建议<button onclick="startNewConversation()" style="background:none;border:none;' +
+    'color:#d97706;font-weight:600;cursor:pointer;padding:0 2px;font-size:13px;' +
+    'text-decoration:underline">新开一个对话</button>以获得更好效果。';
+
+  let tip = document.getElementById('compact-tip');
+  if (tip) {
+    // tip 已存在：只刷新次数文字，无需重新插入
+    tip.querySelector('span').innerHTML = label;
+    return;
+  }
+  tip = document.createElement('div');
+  tip.id = 'compact-tip';
+  tip.style.cssText = [
+    'display:flex', 'align-items:flex-start', 'gap:10px',
+    'margin:12px 0', 'padding:12px 14px', 'border-radius:10px',
+    'background:#fffbeb', 'border:1px solid #fde68a',
+    'font-size:13px', 'color:#92400e', 'line-height:1.5',
+  ].join(';');
+  tip.innerHTML =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"' +
+    ' fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"' +
+    ' stroke-linejoin="round" style="flex-shrink:0;margin-top:2px;color:#d97706">' +
+    '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>' +
+    '<line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>' +
+    '<span>' + label + '</span>';
+  chatBody.appendChild(tip);
+  chatBody.scrollTop = chatBody.scrollHeight;
+}
+
 /* 加载会话列表 */
 async function loadConvList({ keepActive } = {}) {
   try {
@@ -1055,7 +1121,7 @@ async function loadConvList({ keepActive } = {}) {
 
 /* 创建新会话（前端重置，不调接口；接口在第一次发送时由后端创建） */
 function startNewConversation() {
-  convId = null;
+  convId = null;   // 置空后 _setCount / _getCount 自动忽略操作
   chatHist = [];
   rating = 0;
   // 清空消息区
@@ -1091,6 +1157,9 @@ async function switchConversation(id) {
     feedbackBar.style.display = 'none';
     closeFeedback();
 
+    // 从数据库恢复该会话的历史压缩次数（convId 已设置，写入对应 key）
+    _setCount(conv.auto_compact_count || 0);
+
     // 渲染历史消息（全部，包括已压缩部分）
     const msgs = conv.messages || [];
     if (msgs.length === 0) {
@@ -1103,6 +1172,9 @@ async function switchConversation(id) {
       }
       if (msgs.length > 0) feedbackBar.style.display = '';
     }
+
+    // 若历史记录中压缩次数已达阈值，立即展示提示
+    if (_getCount() >= 2) _showCompactTip();
 
     // 更新侧栏激活状态
     document.querySelectorAll('.conv-item').forEach(el => {
@@ -1302,6 +1374,14 @@ async function doSend() {
           }
           chatHist.push({ role: 'assistant', content: agentText });
           feedbackBar.style.display = '';
+        } else if (ev.type === 'auto_compacted') {
+          // 优先使用服务端返回的累计次数（数据库权威值），降级到本地自增
+          if (ev.total_compact_count > 0) {
+            _setCount(ev.total_compact_count);
+          } else {
+            _incCount();
+          }
+          if (_getCount() >= 2) _showCompactTip();
         } else if (ev.type === 'conversation_saved') {
           const isNew = !convId;
           convId = ev.conversation_id;

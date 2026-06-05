@@ -79,17 +79,24 @@ class MCPManager:
         message: str,
         chat_cfg: Dict[str, str],
         history: Optional[List[Dict]] = None,
+        extra_tools: Optional[List] = None,
+        skill_system_prompt: Optional[str] = None,
         timeout: int = 120,
     ) -> str:
         """同步调用飞书 Agent，阻塞等待结果。
 
-        chat_cfg 来自 services.load_chat_settings()。
-        history 为 [{role, content}, ...] 多轮历史，可选。
+        chat_cfg             来自 services.load_chat_settings()。
+        history              [{role, content}, ...] 多轮历史，可选。
+        extra_tools          额外注入的 LangChain 工具（如用户级工具），与 MCP 工具合并。
+        skill_system_prompt  命中 skill 时的专属系统提示，拼在飞书工具说明之前。
         """
         if self._state != STATE_READY:
             raise RuntimeError(f"飞书 MCP 未就绪，当前状态: {self._state}（{self._error or ''}）")
         future = asyncio.run_coroutine_threadsafe(
-            self._invoke_agent(message, chat_cfg, history or []),
+            self._invoke_agent(
+                message, chat_cfg, history or [], extra_tools or [],
+                skill_system_prompt=skill_system_prompt,
+            ),
             self._loop,
         )
         return future.result(timeout=timeout)
@@ -156,9 +163,12 @@ class MCPManager:
         message: str,
         chat_cfg: Dict[str, str],
         history: List[Dict],
+        extra_tools: List,
+        skill_system_prompt: Optional[str] = None,
     ) -> str:
         from langchain_openai import ChatOpenAI
         from langgraph.prebuilt import create_react_agent
+        from langchain_core.messages import SystemMessage
 
         llm = ChatOpenAI(
             model=chat_cfg["model_name"],
@@ -166,7 +176,31 @@ class MCPManager:
             base_url=chat_cfg["base_url"] or None,
             temperature=0,
         )
-        agent = create_react_agent(llm, self._tools)
+        # 合并 MCP 工具 + 额外注入的用户级工具
+        all_tools = list(self._tools) + list(extra_tools)
+
+        # 构建 system prompt：告知 LLM 可用工具，防止其凭训练知识直接拒绝
+        tool_names = [t.name for t in all_tools]
+        contact_tools = [n for n in tool_names if "contact" in n or "department" in n]
+        contact_tool_list = ", ".join(contact_tools) if contact_tools else "（无）"
+        feishu_tool_content = (
+            "你是一个飞书智能助手，可以调用工具完成用户请求。\n\n"
+            "【通讯录查询规则 - 非常重要】\n"
+            "查询联系人、通讯录成员、部门成员时，必须且只能使用以下工具：\n"
+            f"  {contact_tool_list}\n"
+            "严禁使用 contact_v3_user_batchGetId 查询通讯录列表，该工具仅用于已知 ID 时的反查。\n\n"
+            "【通用原则】\n"
+            "- 必须先调用工具，不要凭训练知识直接回答或拒绝。\n"
+            "- 工具调用失败时，返回工具的原始错误信息，不要自行判断权限问题。\n"
+            "- 用中文回复用户。"
+        )
+        # skill 提示词优先，拼在飞书工具说明之前
+        if skill_system_prompt:
+            system_content = skill_system_prompt.strip() + "\n\n---\n\n" + feishu_tool_content
+        else:
+            system_content = feishu_tool_content
+
+        agent = create_react_agent(llm, all_tools, prompt=system_content)
         # 将历史消息转为 (role, content) 列表，末尾追加本轮问题
         messages = [
             {"role": m.get("role", "user"), "content": m.get("content", "")}

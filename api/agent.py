@@ -8,9 +8,11 @@ from datetime import datetime
 from flask import Blueprint, Response, jsonify, request, session, stream_with_context
 
 from agent_service.graph import build_cleaning_graph, build_qa_graph
+from agent_service.skill_loader import detect_skill
 
 from . import conversations as conv_store
 from . import services
+from . import conv_stats
 
 bp = Blueprint("agent", __name__)
 
@@ -173,6 +175,7 @@ def agent_chat():
     except Exception as e:
         return jsonify({"error": f"QA 图初始化失败: {e}"}), 500
 
+    skill = detect_skill(message)
     state = {
         "query": message,
         "history": history,
@@ -180,6 +183,7 @@ def agent_chat():
         "rag_fn": rag_fn if use_rag else None,
         "top_k": top_k,
         "score_threshold": services.load_rag_threshold(),
+        "skill_system_prompt": skill.system_prompt if skill else None,
     }
 
     def generate():
@@ -204,6 +208,8 @@ def agent_chat():
                 if res.get("ok"):
                     new_history = conv_store.get_history(conversation_id, owner_id)
                     state["history"] = new_history
+                    # 写库：压缩次数 +1，并取回最新值随事件下发给前端
+                    total_count = conv_stats.increment_compact_count(owner_id, conversation_id)
                     yield (
                         "data: " + json.dumps({
                             "type": "auto_compacted",
@@ -213,6 +219,7 @@ def agent_chat():
                             "summary_preview": res["summary"][:200],
                             "tokens_before": tokens,
                             "tokens_after": conv_store.estimate_history_tokens(new_history) + conv_store.estimate_tokens(message),
+                            "total_compact_count": total_count,  # 累计压缩次数（供前端判断提示）
                         }, ensure_ascii=False) + "\n\n"
                     )
                 elif res.get("unchanged"):

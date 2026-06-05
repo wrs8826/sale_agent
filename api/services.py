@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional, Tuple
 import yaml
 
 from agent_service import CONFIG_PATH, DOCS_DIR, PACKAGE_ROOT, WIKI_DIR
+from agent_service.skill_loader import all_refs_dirs
 from agent_service.rag import (
     DashScopeReranker,
     DocumentLoader,
@@ -22,7 +23,7 @@ from agent_service.rag import (
 from agent_service.security import decrypt, encrypt, mask
 
 # ── 数据源权重兜底默认 ────────────────────────────────────────────────────────
-_DEFAULT_SOURCE_WEIGHTS = {"docs": 1.0, "wiki": 0.7}
+_DEFAULT_SOURCE_WEIGHTS = {"docs": 1.0, "wiki": 0.7, "skill": 1.0}
 
 # ── 三段 API 配置兜底默认 ─────────────────────────────────────────────────────
 _DEFAULT_QWEN_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -266,12 +267,16 @@ def get_api_key() -> Optional[str]:
 
 
 # ── RAG 索引 ──────────────────────────────────────────────────────────────────
-def _source_snapshot() -> Tuple[frozenset, frozenset, Path]:
-    """返回 (docs 文件集, wiki 文件集, wiki_dir 路径)，作为缓存失效判定依据。"""
+def _source_snapshot() -> Tuple[frozenset, frozenset, frozenset, Path]:
+    """返回 (docs 文件集, wiki 文件集, skill 文件集, wiki_dir 路径)，作为缓存失效判定依据。"""
     wiki_dir = get_wiki_dir()
     docs = frozenset(f.name for f in DOCS_DIR.iterdir() if f.is_file()) if DOCS_DIR.exists() else frozenset()
     wiki = frozenset(f.name for f in wiki_dir.iterdir() if f.is_file()) if wiki_dir.exists() else frozenset()
-    return docs, wiki, wiki_dir
+    skill_files: set = set()
+    for refs_dir in all_refs_dirs():
+        if refs_dir.exists():
+            skill_files.update(f.name for f in refs_dir.iterdir() if f.is_file())
+    return docs, wiki, frozenset(skill_files), wiki_dir
 
 
 def get_rag(
@@ -279,13 +284,13 @@ def get_rag(
     chunk_overlap: int,
     separators: Optional[list],
 ) -> Tuple[Optional[HybridRetriever], bool]:
-    """返回 (rag, rebuilt)。docs/wiki 任一变化、分块参数变化时自动重建。"""
+    """返回 (rag, rebuilt)。docs/wiki/skill 任一变化、分块参数变化时自动重建。"""
     global _rag, _rag_build_key
-    docs_snap, wiki_snap, wiki_dir = _source_snapshot()
+    docs_snap, wiki_snap, skill_snap, wiki_dir = _source_snapshot()
     sep_key = tuple(separators) if separators else None
-    key = (docs_snap, wiki_snap, str(wiki_dir), chunk_size, chunk_overlap, sep_key)
+    key = (docs_snap, wiki_snap, skill_snap, str(wiki_dir), chunk_size, chunk_overlap, sep_key)
 
-    if not docs_snap and not wiki_snap:
+    if not docs_snap and not wiki_snap and not skill_snap:
         _rag, _rag_build_key = None, ()
         return None, False
     if _rag is not None and key == _rag_build_key:
@@ -302,6 +307,8 @@ def get_rag(
 
     all_docs: list = []
     all_metas: list = []
+
+    # ── 常规来源：docs / wiki ──────────────────────────────────────────────
     for source_type, root in (("docs", DOCS_DIR), ("wiki", wiki_dir)):
         if not root.exists():
             continue
@@ -312,6 +319,20 @@ def get_rag(
             continue
         for m in metas:
             m["source_type"] = source_type
+        all_docs.extend(docs)
+        all_metas.extend(metas)
+
+    # ── Skill 来源：skills/*/references/ ─────────────────────────────────
+    for refs_dir in all_refs_dirs():
+        if not refs_dir.exists():
+            continue
+        try:
+            docs, metas = DocumentLoader.load(refs_dir, config=cfg)
+        except Exception as exc:
+            print(f"[services] 加载 skill refs {refs_dir} 失败: {exc}")
+            continue
+        for m in metas:
+            m["source_type"] = "skill"
         all_docs.extend(docs)
         all_metas.extend(metas)
 

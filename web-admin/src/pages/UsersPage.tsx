@@ -1,10 +1,202 @@
 import React, { useState, useEffect } from 'react'
 import {
   Search, Plus, Edit3, Trash2, ShieldAlert, X,
-  ChevronLeft, ChevronRight, RefreshCw, Settings2
+  ChevronLeft, ChevronRight, RefreshCw, Settings2, Loader2
 } from 'lucide-react'
 import { useApp } from '../context/AppContext'
 import type { User } from '../types'
+
+// ── 专属模型配置弹窗 ─────────────────────────────────────────────────────────
+
+type SectionKey = 'chat' | 'cleaner' | 'embedding' | 'reranker'
+
+interface MaskedSettings {
+  [key: string]: {
+    api_key_set: boolean
+    api_key_mask: string
+    base_url: string
+    model_name: string
+  }
+}
+
+interface ModelForm {
+  chat:      { api_key: string; base_url: string; model_name: string }
+  cleaner:   { api_key: string; base_url: string; model_name: string }
+  embedding: { api_key: string; base_url: string; model_name: string }
+  reranker:  { api_key: string; base_url: string; model_name: string }
+}
+
+type DotState = '' | 'ok' | 'err' | 'ing'
+
+const SECTIONS: { key: SectionKey; label: string; hint: string }[] = [
+  { key: 'chat',      label: 'Chat Model',      hint: '对话主模型。API Key 留空则继承系统设置。' },
+  { key: 'cleaner',   label: 'AI 清洗',          hint: '用于资料摘要与反馈整理。留空继承 Chat。' },
+  { key: 'embedding', label: 'Embedding Model',  hint: '向量化模型。留空继承系统设置。⚠ 换模型后需清空向量库。' },
+  { key: 'reranker',  label: 'Rerank Model',     hint: '检索重排序模型。留空继承系统设置。' },
+]
+
+const emptyForm = (): ModelForm => ({
+  chat:      { api_key: '', base_url: '', model_name: '' },
+  cleaner:   { api_key: '', base_url: '', model_name: '' },
+  embedding: { api_key: '', base_url: '', model_name: '' },
+  reranker:  { api_key: '', base_url: '', model_name: '' },
+})
+
+interface ModelModalProps {
+  uid: number
+  username: string
+  onClose: () => void
+  onSaved: () => void
+}
+
+const ModelModal: React.FC<ModelModalProps> = ({ uid, username, onClose, onSaved }) => {
+  const { showToast } = useApp()
+  const [masked, setMasked] = useState<MaskedSettings | null>(null)
+  const [form, setForm] = useState<ModelForm>(emptyForm())
+  const [dots, setDots] = useState<Record<SectionKey, DotState>>({
+    chat: '', cleaner: '', embedding: '', reranker: '',
+  })
+  const [status, setStatus] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+
+  useEffect(() => {
+    fetch(`/users/${uid}/settings`)
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => {
+        const s: MaskedSettings = data.settings || {}
+        setMasked(s)
+        setForm({
+          chat:      { api_key: '', base_url: s.chat?.base_url ?? '',      model_name: s.chat?.model_name ?? '' },
+          cleaner:   { api_key: '', base_url: s.cleaner?.base_url ?? '',   model_name: s.cleaner?.model_name ?? '' },
+          embedding: { api_key: '', base_url: s.embedding?.base_url ?? '', model_name: s.embedding?.model_name ?? '' },
+          reranker:  { api_key: '', base_url: s.reranker?.base_url ?? '',  model_name: s.reranker?.model_name ?? '' },
+        })
+      })
+      .catch(() => setStatus('加载失败'))
+  }, [uid])
+
+  const setField = (sec: SectionKey, field: keyof ModelForm[SectionKey], val: string) =>
+    setForm(f => ({ ...f, [sec]: { ...f[sec], [field]: val } }))
+
+  const setAllDots = (state: DotState) =>
+    setDots({ chat: state, cleaner: state, embedding: state, reranker: state })
+
+  const handleTest = async () => {
+    setTesting(true)
+    setAllDots('ing')
+    setStatus('测试中…')
+    try {
+      const res = await fetch(`/users/${uid}/settings/test`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      })
+      const data = await res.json()
+      if (!res.ok) { setAllDots('err'); setStatus(data.error || '测试失败'); return }
+      const results = data.results as Record<string, { ok: boolean; latency_ms: number; error: string }>
+      const newDots = { ...dots }
+      for (const [sec, r] of Object.entries(results)) {
+        newDots[sec as SectionKey] = r.ok ? 'ok' : 'err'
+      }
+      setDots(newDots)
+      const allOk = Object.values(results).every(r => r.ok)
+      setStatus(allOk ? '全部连通 ✓' : '部分连通失败，查看圆点提示')
+    } catch { setAllDots('err'); setStatus('网络错误') }
+    finally { setTesting(false) }
+  }
+
+  const handleSave = async () => {
+    setSaving(true)
+    setStatus('保存中…')
+    try {
+      const res = await fetch(`/users/${uid}/settings`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      })
+      const data = await res.json()
+      if (!res.ok) { setStatus(data.error || '保存失败'); return }
+      showToast('专属模型配置已保存')
+      onSaved()
+      onClose()
+    } catch { setStatus('网络错误') }
+    finally { setSaving(false) }
+  }
+
+  const dotClass = (s: DotState) => {
+    const base = 'w-2 h-2 rounded-full shrink-0 transition-colors'
+    if (s === 'ok')  return base + ' bg-green-500'
+    if (s === 'err') return base + ' bg-red-500'
+    if (s === 'ing') return base + ' bg-blue-500 animate-pulse'
+    return base + ' bg-[#d1d5db]'
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl flex flex-col max-h-[90vh]" onClick={e => e.stopPropagation()}>
+        {/* Head */}
+        <div className="flex items-start justify-between px-6 pt-5 pb-4 border-b border-[#e5e5e5]">
+          <div>
+            <h2 className="text-base font-semibold text-[#171717]">专属模型配置</h2>
+            <p className="text-xs text-[#9ca3af] mt-0.5">用户：{username}</p>
+          </div>
+          <button onClick={onClose} className="text-[#9ca3af] hover:text-[#171717] mt-0.5"><X size={18} /></button>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto px-6 py-4 flex flex-col gap-5">
+          {masked === null ? (
+            <div className="flex items-center justify-center py-10">
+              <Loader2 size={20} className="animate-spin text-[#9ca3af]" />
+            </div>
+          ) : SECTIONS.map(sec => (
+            <div key={sec.key}>
+              <div className="flex items-center gap-2 mb-1">
+                <span className={dotClass(dots[sec.key])} />
+                <span className="text-sm font-semibold text-[#171717]">{sec.label}</span>
+              </div>
+              <p className="text-xs text-[#9ca3af] mb-2 ml-4">{sec.hint}</p>
+              <div className="ml-4 flex flex-col gap-2">
+                <input type="password"
+                  placeholder={masked[sec.key]?.api_key_set ? '（已设置，留空保留原值）' : '留空继承系统设置'}
+                  value={form[sec.key].api_key}
+                  onChange={e => setField(sec.key, 'api_key', e.target.value)}
+                  className="w-full px-3 py-2 border border-[#e5e5e5] rounded-lg text-sm focus:outline-none focus:border-[#3b82f6] placeholder:text-[#d1d5db]"
+                />
+                <input type="text" placeholder="Base URL（留空继承）"
+                  value={form[sec.key].base_url}
+                  onChange={e => setField(sec.key, 'base_url', e.target.value)}
+                  className="w-full px-3 py-2 border border-[#e5e5e5] rounded-lg text-sm focus:outline-none focus:border-[#3b82f6]"
+                />
+                <input type="text" placeholder="Model Name（留空继承）"
+                  value={form[sec.key].model_name}
+                  onChange={e => setField(sec.key, 'model_name', e.target.value)}
+                  className="w-full px-3 py-2 border border-[#e5e5e5] rounded-lg text-sm focus:outline-none focus:border-[#3b82f6]"
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center gap-3 px-6 py-4 border-t border-[#e5e5e5]">
+          <span className="flex-1 text-xs text-[#9ca3af] truncate">{status}</span>
+          <button onClick={handleTest} disabled={testing || masked === null}
+            className="px-3 py-2 border border-[#e5e5e5] rounded-lg text-sm text-[#6b6b6b] hover:bg-[#f7f7f8] disabled:opacity-40 transition-colors">
+            测试连通
+          </button>
+          <button onClick={onClose}
+            className="px-3 py-2 border border-[#e5e5e5] rounded-lg text-sm text-[#6b6b6b] hover:bg-[#f7f7f8] transition-colors">
+            取消
+          </button>
+          <button onClick={handleSave} disabled={saving || masked === null}
+            className="px-4 py-2 bg-[#3b82f6] hover:bg-[#2563eb] text-white rounded-lg text-sm font-medium disabled:opacity-40 transition-colors">
+            保存
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 const Badge: React.FC<{ banned: boolean }> = ({ banned }) => (
   <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium
@@ -34,6 +226,7 @@ const UsersPage: React.FC = () => {
   const [deleteId, setDeleteId] = useState<number | null>(null)
   const [editDraft, setEditDraft] = useState<Partial<User>>({})
   const [newUser, setNewUser] = useState({ username: '', phone: '', department: '', password: '' })
+  const [modelUser, setModelUser] = useState<User | null>(null)
 
   useEffect(() => {
     fetch('/users')
@@ -173,6 +366,8 @@ const UsersPage: React.FC = () => {
                   <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button onClick={() => openEdit(u)} title="编辑"
                       className="text-[#9ca3af] hover:text-[#3b82f6] transition-colors"><Edit3 size={14} /></button>
+                    <button onClick={() => setModelUser(u)} title="专属模型配置"
+                      className="text-[#9ca3af] hover:text-green-600 transition-colors"><Settings2 size={14} /></button>
                     <button onClick={() => toggleBan(u)} title={u.is_banned ? '解封' : '封禁'}
                       className={`transition-colors ${u.is_banned ? 'text-green-400 hover:text-green-600' : 'text-[#9ca3af] hover:text-amber-500'}`}>
                       <ShieldAlert size={14} />
@@ -291,6 +486,20 @@ const UsersPage: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Model Config Modal */}
+      {modelUser && (
+        <ModelModal
+          uid={modelUser.id}
+          username={modelUser.username}
+          onClose={() => setModelUser(null)}
+          onSaved={() => {
+            setUsers(prev => prev.map(u =>
+              u.id === modelUser.id ? { ...u, has_custom_settings: true } : u
+            ))
+          }}
+        />
       )}
 
       {/* Delete Confirm */}

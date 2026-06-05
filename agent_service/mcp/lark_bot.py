@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -154,6 +155,23 @@ class LarkBot:
             if not content:
                 return
 
+            # ── 特殊指令 ──────────────────────────────────────────────────────
+            cmd = content.strip().lower()
+            if cmd == "clear":
+                reply_text = self._save_and_clear(open_id=open_id, chat_id=chat_id)
+                self._send_reply(message_id, reply_text)
+                return
+            if cmd == "auth":
+                reply_text = self._send_auth_link(open_id=open_id, message_id=message_id)
+                # _send_auth_link 内部已发送消息卡片，此处只补一条文本回复
+                if reply_text:
+                    self._send_reply(message_id, reply_text)
+                return
+            if cmd == "deauth":
+                reply_text = self._revoke_auth(open_id=open_id)
+                self._send_reply(message_id, reply_text)
+                return
+
             reply_text = self._query(content, open_id=open_id, chat_id=chat_id)
             if not reply_text:
                 return
@@ -171,19 +189,148 @@ class LarkBot:
         except Exception as exc:
             print(f"[lark_bot] 消息处理失败: {exc}")
 
+    # ── OAuth 相关 ────────────────────────────────────────────────────────────
+
+    def _send_auth_link(self, *, open_id: str, message_id: str) -> str:
+        """生成 OAuth 授权链接，以消息卡片形式发给用户。
+
+        返回空字符串表示卡片已发出，调用方不必再额外回复。
+        返回非空字符串时作为降级文本回复（例如配置缺失时的错误提示）。
+        """
+        try:
+            cfg = _load_cfg()
+            app_id = cfg.get("app_id", "")
+            redirect_uri = cfg.get("oauth_redirect_uri", "")
+            if not redirect_uri:
+                return "⚙️ 未配置 OAuth 回调地址（oauth_redirect_uri），请联系管理员。"
+
+            from agent_service.mcp.lark_oauth import get_auth_url
+            url = get_auth_url(app_id, redirect_uri, state=open_id)
+
+            # 发送可点击的消息卡片（Interactive Card）
+            card_content = {
+                "type": "template",
+                "data": {
+                    "template_id": "",   # 不使用模板
+                }
+            }
+            # 降级：用普通文本消息发链接
+            self._send_reply(
+                message_id,
+                f"🔐 请点击下方链接完成个人账户授权（有效期 5 分钟）：\n{url}\n\n"
+                f"授权后即可使用查询联系人等需要个人权限的功能。",
+            )
+            return ""   # 已在上方 _send_reply 中发出，外层不再重复发
+        except Exception as exc:
+            print(f"[lark_bot] 生成授权链接失败: {exc}")
+            return f"❌ 生成授权链接失败: {exc}"
+
+    def _revoke_auth(self, *, open_id: str) -> str:
+        """撤销本地存储的用户授权 token。"""
+        try:
+            from agent_service.mcp.lark_token_store import clear as clear_token
+            removed = clear_token(open_id)
+            return "✅ 已清除您的授权信息。" if removed else "📭 您当前没有已保存的授权信息。"
+        except Exception as exc:
+            return f"❌ 撤销失败: {exc}"
+
+    def _save_and_clear(self, *, open_id: str, chat_id: str) -> str:
+        """将当前飞书会话历史归档到 wiki 知识库，然后清除历史文件。
+
+        流程：
+          1. 加载历史；无历史则直接返回提示
+          2. 调清洗子图（复用 feedback 同一 prompt）生成摘要
+          3. 摘要写入 wiki/；失效 RAG 缓存
+          4. 删除飞书历史文件
+        """
+        from agent_service.mcp.lark_history import load_history, clear_history
+
+        history = load_history(open_id, chat_id)
+        if not history:
+            return "📭 当前没有可保存的对话历史。"
+
+        # 拼接对话文本（与 web 端 /feedback 格式一致）
+        conv_text = "\n".join(
+            f"{'用户' if m.get('role') == 'user' else '助手'}：{m.get('content', '')}"
+            for m in history
+        )
+        llm_input = (
+            f"用户评分：5/5\n"
+            f"用户评语：飞书机器人手动归档\n\n"
+            f"对话记录：\n{conv_text}"
+        )
+
+        try:
+            from api import services  # lazy import，避免循环依赖
+            from agent_service.graph import build_cleaning_graph
+            from api.agent import _FEEDBACK_SYSTEM
+
+            cleaner_cfg = services.load_cleaner_settings()
+            if not cleaner_cfg.get("api_key"):
+                return "❌ 未配置 API Key，无法清洗对话，历史未清除。"
+
+            out = build_cleaning_graph().invoke({
+                "raw_text": llm_input,
+                "system_prompt": _FEEDBACK_SYSTEM,
+                "cleaner_cfg": cleaner_cfg,
+            })
+            if out.get("error"):
+                return f"❌ 清洗失败：{out['error']}，历史未清除。"
+
+            cleaned = (out.get("cleaned_text") or "").strip()
+
+            if cleaned:
+                wiki_dir = services.get_wiki_dir()
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                safe_uid = re.sub(r"[^\w]", "_", open_id or "lark")[:20]
+                filename = f"feedback_{safe_uid}_lark_{ts}_5star.txt"
+                header = (
+                    f"# 对话反馈摘要\n"
+                    f"# 来源: 飞书机器人\n"
+                    f"# 用户 open_id: {open_id or '未知'}\n"
+                    f"# 会话 chat_id: {chat_id or '未知'}\n"
+                    f"# 时间: {ts}\n\n"
+                )
+                (wiki_dir / filename).write_text(header + cleaned, encoding="utf-8")
+                services.invalidate_rag()
+                result_msg = f"✅ 对话已归档至知识库（{filename}），历史已清除。"
+            else:
+                result_msg = "📭 本轮对话无可提取的知识内容，历史已清除。"
+
+        except Exception as exc:
+            print(f"[lark_bot] _save_and_clear 失败: {exc}")
+            return f"❌ 归档失败：{exc}"
+
+        # 无论是否有内容，都删除历史
+        try:
+            clear_history(open_id, chat_id)
+        except Exception as exc:
+            print(f"[lark_bot] 历史删除失败: {exc}")
+
+        return result_msg
+
     def _query(self, text: str, *, open_id: str = "", chat_id: str = "") -> str:
         """生成回复文本。
 
         优先路径：MCP 就绪 → ReAct Agent（具备飞书工具调用能力）
         降级路径：MCP 未就绪 → RAG QA 图（纯知识库问答）
+
+        两条路径均通过 detect_skill() 注入专属 skill 系统提示。
         """
         # lazy import 避免循环依赖（pitfall #13）
         from api import services
+        from agent_service.skill_loader import detect_skill
 
         chat_cfg = services.load_chat_settings()
         if not chat_cfg.get("api_key"):
             print("[lark_bot] chat API key 未配置，跳过回复")
             return ""
+
+        # ── Skill 检测（两条路径共用） ────────────────────────────────────────
+        skill = detect_skill(text)
+        skill_prompt: str = skill.system_prompt if skill else ""
+        if skill:
+            print(f"[lark_bot] 命中 skill: {skill.name}")
 
         # 加载对话历史（读失败以空历史继续，不中断服务）
         history: list = []
@@ -198,7 +345,37 @@ class LarkBot:
         from agent_service.mcp.mcp_manager import mcp_manager
         if mcp_manager.get_status()["state"] == "ready":
             try:
-                return mcp_manager.run_agent_sync(text, chat_cfg, history=history)
+                extra_tools = []
+                cfg = _load_cfg()
+                app_id     = cfg.get("app_id", "")
+                app_secret = cfg.get("app_secret", "")
+
+                # 注入 tenant 级工具（app token，无需用户授权）
+                try:
+                    from agent_service.mcp.lark_tenant_tools import build_tenant_tools
+                    tenant_tools = build_tenant_tools(app_id, app_secret)
+                    extra_tools.extend(tenant_tools)
+                    print(f"[lark_bot] 注入 tenant 工具: {[t.name for t in tenant_tools]}")
+                except Exception as exc:
+                    print(f"[lark_bot] tenant 工具加载失败（不影响基础功能）: {exc}")
+
+                # 若用户已完成 OAuth 授权，额外注入用户级工具
+                if open_id:
+                    try:
+                        from agent_service.mcp.lark_token_store import get_valid_token
+                        user_token = get_valid_token(open_id, app_id, app_secret)
+                        if user_token:
+                            from agent_service.mcp.lark_user_tools import build_user_tools
+                            extra_tools.extend(build_user_tools(user_token))
+                    except Exception as exc:
+                        print(f"[lark_bot] 用户工具加载失败（不影响基础功能）: {exc}")
+
+                return mcp_manager.run_agent_sync(
+                    text, chat_cfg,
+                    history=history,
+                    extra_tools=extra_tools,
+                    skill_system_prompt=skill_prompt or None,
+                )
             except Exception as exc:
                 print(f"[lark_bot] MCP Agent 调用失败，降级到 QA 图: {exc}")
 
@@ -227,6 +404,7 @@ class LarkBot:
             "rag_fn": rag_fn if rag else None,
             "top_k": 5,
             "score_threshold": services.load_rag_threshold(),
+            "skill_system_prompt": skill_prompt or None,
         }
 
         full_text = ""

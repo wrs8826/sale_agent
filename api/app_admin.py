@@ -19,6 +19,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 from flask import Flask, redirect, send_from_directory, session
 
 from agent_service import CONVERSATIONS_DIR, DOCS_DIR, WIKI_DIR
+from api.session_store import configure_session
+from api.conv_stats import ensure_table as ensure_stats_table
 from api.agent import bp as agent_bp
 from api.auth import bp as auth_bp
 from api.conversations import bp as conversations_bp
@@ -31,16 +33,18 @@ from agent_service.mcp.mcp_manager import mcp_manager
 from agent_service.mcp.lark_bot import lark_bot
 
 WEB_DIR = _PROJECT_ROOT / "web"
+ADMIN_DIST = _PROJECT_ROOT / "web-admin" / "dist"
 
 
 def create_app() -> Flask:
     app = Flask(__name__, static_folder=None)
     app.secret_key = os.getenv("ADMIN_SECRET_KEY", "admin-app-secret-key-change-in-prod")
-    app.config["PERMANENT_SESSION_LIFETIME"] = 86400 * 7
+    configure_session(app, key_prefix="admin_sess:")
 
     DOCS_DIR.mkdir(exist_ok=True)
     WIKI_DIR.mkdir(exist_ok=True)
     CONVERSATIONS_DIR.mkdir(exist_ok=True)
+    ensure_stats_table()
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(agent_bp)
@@ -54,42 +58,29 @@ def create_app() -> Flask:
     mcp_manager.start()
     lark_bot.start()
 
-    def _admin_check():
-        return session.get("user_id") and session.get("role") == "admin"
-
-    @app.route("/")
-    def index():
-        if _admin_check():
-            return redirect("/admin")
-        return send_from_directory(str(WEB_DIR / "admin"), "login.html")
-
-    @app.route("/admin")
-    def admin_index():
-        if not _admin_check():
-            return redirect("/")
-        return send_from_directory(str(WEB_DIR / "admin"), "knowledge.html")
-
-    @app.route("/admin/knowledge")
-    def admin_knowledge():
-        if not _admin_check():
-            return redirect("/")
-        return send_from_directory(str(WEB_DIR / "admin"), "knowledge.html")
-
-    @app.route("/admin/chat")
-    def admin_chat():
-        if not _admin_check():
-            return redirect("/")
-        return send_from_directory(str(WEB_DIR / "admin"), "chat.html")
-
-    @app.route("/admin/users")
-    def admin_users():
-        if not _admin_check():
-            return redirect("/")
-        return send_from_directory(str(WEB_DIR / "admin"), "users.html")
-
+    # React SPA 静态资源（hash 命名，永久缓存）
     @app.route("/assets/<path:filename>")
-    def assets(filename):
+    def spa_assets(filename):
+        # 优先从 React build 的 assets/ 目录响应
+        dist_assets = ADMIN_DIST / "assets"
+        if (dist_assets / filename).exists():
+            return send_from_directory(str(dist_assets), filename)
+        # 兜底：用户端共享 CSS/JS（user.html 等仍需要）
         return send_from_directory(str(WEB_DIR / "assets"), filename)
+
+    # 所有非 API 路由均返回 React SPA 入口（客户端路由）
+    @app.route("/", defaults={"path": ""})
+    @app.route("/<path:path>")
+    def spa_index(path):
+        # API 蓝图已优先匹配，此处只处理前端路由
+        index_file = ADMIN_DIST / "index.html"
+        if not index_file.exists():
+            return (
+                "<h2>管理员前端未构建</h2>"
+                "<p>请先执行：<code>cd web-admin && npm run build</code></p>",
+                503,
+            )
+        return send_from_directory(str(ADMIN_DIST), "index.html")
 
     return app
 

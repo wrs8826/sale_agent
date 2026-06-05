@@ -11,7 +11,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.config import get_stream_writer
 
 from ..state import ChatState
-from .prompts import EXTRACT_SYSTEM, GENERATE_FALLBACK_SYSTEM, GENERATE_SYSTEM
+from .prompts import EXTRACT_SYSTEM, GENERATE_FALLBACK_SYSTEM, GENERATE_SYSTEM, TOOL_RESULTS_PREFIX
 
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
@@ -65,6 +65,48 @@ def _build_llm(chat_cfg: Dict[str, str]) -> ChatOpenAI:
 
 
 # ── 节点 ──────────────────────────────────────────────────────────────────────
+
+def call_tools_node(state: ChatState) -> ChatState:
+    """工具调用节点：让 LLM 决定是否需要调用内置工具，执行后把结果写入 tool_results。
+
+    LLM 若认为不需要工具，直接返回文本，tool_results 保持 None，不影响后续节点。
+    """
+    writer = get_stream_writer()
+
+    from agent_service.mcp.builtin_tools import BUILTIN_TOOLS
+    if not BUILTIN_TOOLS:
+        return {"tool_results": None}
+
+    llm = _build_llm(state["chat_cfg"]).bind_tools(BUILTIN_TOOLS)
+
+    try:
+        response = llm.invoke([HumanMessage(content=state["query"])])
+    except Exception as exc:
+        print(f"[call_tools] 工具检测异常: {exc}")
+        return {"tool_results": None}
+
+    if not getattr(response, "tool_calls", None):
+        return {"tool_results": None}
+
+    results: List[str] = []
+    for tc in response.tool_calls:
+        name = tc["name"]
+        args = tc.get("args", {})
+        writer({"type": "tool_start", "name": name})
+        matched = next((t for t in BUILTIN_TOOLS if t.name == name), None)
+        if matched is None:
+            writer({"type": "tool_end", "name": name, "error": "未找到工具"})
+            continue
+        try:
+            result = matched.invoke(args)
+            results.append(f"{name}: {result}")
+            writer({"type": "tool_end", "name": name, "result": str(result)})
+        except Exception as exc:
+            writer({"type": "tool_end", "name": name, "error": str(exc)})
+
+    return {"tool_results": "\n".join(results) if results else None}
+
+
 def extract_keywords_node(state: ChatState) -> ChatState:
     writer = get_stream_writer()
     writer({"type": "tool_start", "name": "提取关键词"})
@@ -122,12 +164,26 @@ def generate_node(state: ChatState) -> ChatState:
     llm = _build_llm(state["chat_cfg"])
     hits = state.get("hits") or []
     threshold = state.get("score_threshold") or 0.3
+    skill_prompt = (state.get("skill_system_prompt") or "").strip()
+    tool_results = (state.get("tool_results") or "").strip()
 
     if _hits_above_threshold(hits, threshold):
         ctx = _format_context(hits)
-        system_prompt = GENERATE_SYSTEM.format(context=ctx)
+        if skill_prompt:
+            system_prompt = (
+                skill_prompt
+                + "\n\n──── 检索片段 ────\n"
+                + ctx
+                + "\n──── 片段结束 ────"
+            )
+        else:
+            system_prompt = GENERATE_SYSTEM.format(context=ctx)
     else:
-        system_prompt = GENERATE_FALLBACK_SYSTEM
+        system_prompt = skill_prompt or GENERATE_FALLBACK_SYSTEM
+
+    # 工具结果追加到系统提示末尾（不覆盖 RAG 上下文）
+    if tool_results:
+        system_prompt += TOOL_RESULTS_PREFIX + tool_results
 
     msgs = [
         SystemMessage(content=system_prompt),
