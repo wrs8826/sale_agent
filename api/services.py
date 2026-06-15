@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -37,6 +38,8 @@ _rag: Optional[HybridRetriever] = None
 _rag_build_key: Tuple = ()
 _reranker: Optional[DashScopeReranker] = None
 _reranker_key: Tuple = ()
+# 多对话并行场景下，避免多个请求同时触发 RAG 重建造成竞态
+_rag_lock = threading.Lock()
 
 
 # ── 配置读取 ──────────────────────────────────────────────────────────────────
@@ -291,10 +294,27 @@ def get_rag(
     key = (docs_snap, wiki_snap, skill_snap, str(wiki_dir), chunk_size, chunk_overlap, sep_key)
 
     if not docs_snap and not wiki_snap and not skill_snap:
-        _rag, _rag_build_key = None, ()
+        with _rag_lock:
+            _rag, _rag_build_key = None, ()
         return None, False
     if _rag is not None and key == _rag_build_key:
         return _rag, False
+
+    with _rag_lock:
+        # 双重检查：等待锁期间可能已被其他请求重建完毕
+        if _rag is not None and key == _rag_build_key:
+            return _rag, False
+        return _rebuild_rag(key, wiki_dir, chunk_size, chunk_overlap, sep_key)
+
+
+def _rebuild_rag(
+    key: Tuple,
+    wiki_dir,
+    chunk_size: int,
+    chunk_overlap: int,
+    sep_key,
+) -> Tuple[Optional[HybridRetriever], bool]:
+    global _rag, _rag_build_key
 
     base_cfg = load_config()
     cfg = dataclasses.replace(

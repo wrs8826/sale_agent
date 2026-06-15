@@ -35,7 +35,7 @@
         {
           key: "embedding",
           subtitle: "Embedding Model",
-          hint: "向量化模型。默认 text-embedding-v4，留空 API Key / base_url 继承 Chat Model。⚠ 更换后请清空向量库并重新入库，否则维度不匹配会查询失败。",
+          hint: "向量化模型。默认 BAAI/bge-large-zh-v1.5（本地 sentence-transformers），留空 API Key / base_url 继承 Chat Model。⚠ 更换后请清空向量库并重新入库，否则维度不匹配会查询失败。",
         },
         {
           key: "reranker",

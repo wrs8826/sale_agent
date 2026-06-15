@@ -202,6 +202,19 @@ def logout():
 def me():
     if not session.get("user_id"):
         return jsonify({"error": "未登录"}), 401
+
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT is_banned FROM users WHERE id = %s", (session["user_id"],))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+
+    if row is None or row.get("is_banned"):
+        session.clear()
+        return jsonify({"error": "该账号已被封禁，请联系管理员"}), 403
+
     return jsonify({
         "user_id": session["user_id"],
         "username": session["username"],

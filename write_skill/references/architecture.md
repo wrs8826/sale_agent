@@ -25,11 +25,12 @@
 ┌────────────────────────────────────────────────────────────┐
 │  agent_service/  (业务核心)                                │
 │  ── RAG、LangGraph 图、加密、配置                          │
-│  ── skill_loader.py：解析 skills/ 目录，关键词匹配         │
+│  ── skill_loader.py：三层披露；triggers 匹配；L1 表        │
 ├────────────────────────────────────────────────────────────┤
 │  skills/  (技能包，与项目根同级)                           │
-│  ── <技能名>/SKILL.md：frontmatter(name/desc) + 系统提示   │
-│  ── <技能名>/references/*.md：RAG 索引的政策文档           │
+│  ── <技能名>/SKILL.md：frontmatter(name/desc/triggers)     │
+│  ──                   + body = L2 系统提示                  │
+│  ── <技能名>/references/*.md：L3 政策文档（工具按需读取）   │
 └────────────────────────────────────────────────────────────┘
                             ↓ TCP
 ┌────────────────────────────────────────────────────────────┐
@@ -154,13 +155,15 @@ START ──route_input──┬─► read_file ──after_read──┬─►
 ### QA 主图（`graph/qa/`）
 
 ```
-START → extract_keywords ──after_extract──┬─► retrieve → generate → END
-                                          └─► generate → END (rag_fn=None)
+START → call_tools → extract_keywords ──after_extract──┬─► retrieve → generate → END
+                                                       └─► generate → END (rag_fn=None)
 ```
 
-- 输入：`ChatState{query, history, chat_cfg, rag_fn, top_k}`
+- 输入：`ChatState{query, history, chat_cfg, rag_fn, top_k, score_threshold, skill_system_prompt, skill_table, keywords, hits, tool_results, full_text, error}`
+- `call_tools` 节点优先执行：将 `skill_system_prompt`（含文档地图）注入给 LLM，LLM 按需调用内置工具（如 `load_policy_file`），结果写入 `tool_results`
 - 节点用 `langgraph.config.get_stream_writer()` 推 SSE 事件
 - 外层用 `graph.stream(state, stream_mode="custom")` 直接转发为 SSE 流
+- `retrieve` 节点内部 `HybridRetriever.search()`（`agent_service/rag/simple_rag.py`）用 `ThreadPoolExecutor` 并行执行 BM25 检索与向量检索（embedding API 调用 + Chroma 查询），再做混合分数融合
 
 ## 数据流
 
@@ -184,7 +187,10 @@ api    有 conversation_id → 验证归属 → load_conversation(cid, user_id)
        无 conversation_id 且已登录 → 自动创建新会话（user_id 子目录）
 api    get_history(cid, user_id) (含 summary 拼成 system 消息)
 api    估算 token，超 80% 阈值 → 自动压缩 → reload history
+api    detect_skill(message) → skill_system_prompt（含文档地图）
+api    build_skill_table() → skill_table（L1 常驻注入）
 api    build_qa_graph().stream(state, stream_mode="custom")
+        ↓ call_tools: 注入 skill_system_prompt，LLM 按需调 load_policy_file 等内置工具
         ↓ SSE: tool_start / tool_end / token / done / error
 api    append_turn(cid, user_id, message, full_text)  ← 持久化
 浏览器  收 conversation_saved {conversation_id} → 刷新侧栏
@@ -197,11 +203,77 @@ api    拼 raw_text → build_cleaning_graph().invoke({_FEEDBACK_SYSTEM})
 api    写 wiki/feedback_<ts>_<r>star.txt → invalidate_rag()
 ```
 
+## Skill 系统（三层披露 + Path 2 工具读取）
+
+### 目录约定
+
+```
+skills/
+└── <技能名>/
+    ├── SKILL.md          ← frontmatter(name/description/triggers) + body(L2 系统提示+文档地图)
+    └── references/
+        └── *.md          ← L3 精细化政策文档（按问题类型拆分，每文件 400-800 字）
+```
+
+### 三层披露
+
+| 层级 | 内容 | 注入时机 |
+|---|---|---|
+| L1 | `build_skill_table()` 返回的 Markdown 表（name + description） | **常驻**注入每次 generate_node |
+| L2 | `skill.system_prompt`（SKILL.md body，含角色定位 + 文档地图） | 关键词命中后注入 |
+| L3 | `references/*.md` 政策原文 | `call_tools_node` 中 LLM 调 `load_policy_file` 按需读取 |
+
+### Path 2 架构：工具按需读取（非 RAG）
+
+**核心原则**：`references/` 文件**不进 RAG 向量索引**（`all_refs_dirs()` 返回 `[]`），由模型通过工具显式获取。
+
+**运行流程**：
+```
+用户提问
+  ↓
+detect_skill(query) → skill_system_prompt（含文档地图 Markdown 表）
+  ↓
+call_tools_node：将 skill_system_prompt 注入 LLM
+  LLM 读取文档地图 → 决定调哪个文件
+  → load_policy_file("甬江人才政策", "申报条件_制造业.md")
+  → 返回文件全文，写入 tool_results
+  ↓
+generate_node：skill_prompt + tool_results → 回答
+```
+
+**优势**：不同政策文档完全隔离（不存在跨政策 RAG 污染）；政策更新只需改文件，无需重建向量库；成本低（无 embedding）。
+
+### 内置工具（`agent_service/mcp/builtin_tools.py`）
+
+| 工具名 | 参数 | 用途 |
+|---|---|---|
+| `load_policy_file` | `skill_name, filename` | 读取 `skills/<skill_name>/references/<filename>` 全文 |
+| `get_current_time` | `timezone` | 获取当前日期时间 |
+
+新增工具：在 `builtin_tools.py` 加 `@tool` 函数，追加到 `BUILTIN_TOOLS` 列表即可。
+
+### 文档地图约定（SKILL.md body）
+
+每个 L3 文件对应文档地图中的一行，格式：
+
+```markdown
+| 问题类型描述（触发条件） | `references/文件名.md` |
+```
+
+模型在 `call_tools_node` 中读取文档地图，按问题类型匹配对应文件名，调 `load_policy_file` 传入。
+
+### 触发匹配（`skill_loader.py`）
+
+1. SKILL.md frontmatter 的 `triggers:` YAML list（精确子串匹配，优先）
+2. 降级：从 `description` 抽取引号包裹词 + `- ` 条目首词
+
+`detect_skill(query)` 返回第一个命中的 `SkillDef`，无匹配返回 `None`。
+
 ## 单例与缓存（`api/services.py`）
 
 | 单例 | 缓存 key | 失效时机 |
 |---|---|---|
-| `_rag` | `(docs 文件名 frozenset, wiki 文件名 frozenset, chunk_size, chunk_overlap, separators)` | 文件增删 / 分块参数改 / 显式 `invalidate_rag()` |
+| `_rag` | `(docs 文件名 frozenset, wiki 文件名 frozenset, chunk_size, chunk_overlap, separators)` | 文件增删 / 分块参数改 / 显式 `invalidate_rag()`；重建逻辑由 `_rag_lock`（`threading.Lock` + 双重检查）保护，避免多对话并行请求同时触发重建 |
 | `_reranker` | `(api_key, model_name)` | settings 改 / 显式 `invalidate_reranker()` |
 | `Fernet` 实例 | 全局 lazy 单例 | 重启 |
 
@@ -213,13 +285,15 @@ settings 写回（POST /settings）后两个缓存都会被强制失效。
 # 旧字段（向后兼容；embedder 在 chat fallback 链中末尾）
 api_key: "sk-..."             # 明文，旧版用；新版优先 chat.api_key
 api_base: "https://..."
-embedder_name: "text-embedding-v4"
+embedder_name: "BAAI/bge-large-zh-v1.5"  # 本地 sentence-transformers 模型
+api_provider: null             # null → 走本地 sentence-transformers，而非外部 embedding API
+use_sentence_transformers: true
 
 # 新四段（settings 抽屉写入；api_key 加密）
 chat:     { api_key: "enc:...", base_url: "...", model_name: "qwen3-max" }
 cleaner:  { api_key: "",        base_url: "",    model_name: "" }    # 空=继承 chat
 reranker: { api_key: "",        base_url: "",    model_name: "gte-rerank-v2" }
-embedding:{ api_key: "",        base_url: "",    model_name: "text-embedding-v4" }
+embedding:{ api_key: "",        base_url: "",    model_name: "BAAI/bge-large-zh-v1.5" }  # 本地模型，无需 api_key/base_url
 
 # 存储配置（settings 抽屉 Storage 段写入）
 storage:

@@ -27,7 +27,7 @@ This is a Flask + LangGraph sales assistant with RAG, dual-server architecture, 
 
 Two independent Flask processes with separate sessions and secret keys:
 - **`api/app_user.py`** → port 5001, vanilla JS frontend in `web/`
-- **`api/app_admin.py`** → port 5002, React/TypeScript frontend in `web-admin/` (Vite dev) or `web/admin/` (vanilla)
+- **`api/app_admin.py`** → port 5002, React/TypeScript frontend in `web-admin/` (Vite dev on :5173, or built `web-admin/dist/` served by nginx)
 
 Both register the same set of blueprints. Session cookies use different secret keys (`USER_SECRET_KEY` / `ADMIN_SECRET_KEY`) so they never cross-authenticate.
 

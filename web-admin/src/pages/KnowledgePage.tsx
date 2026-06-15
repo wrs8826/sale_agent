@@ -43,16 +43,32 @@ const SliderRow: React.FC<{
   </div>
 )
 
+type ModalState = {
+  open: boolean
+  filename: string
+  progress: number          // 0–100
+  statusMsg: string
+  phase: 'processing' | 'done' | 'error'
+}
+const MODAL_INIT: ModalState = { open: false, filename: '', progress: 0, statusMsg: '', phase: 'processing' }
+
 const KnowledgePage: React.FC = () => {
   const { showToast } = useApp()
   const [files, setFiles] = useState<KnowledgeFile[]>([])
   const [filesLoading, setFilesLoading] = useState(true)
   const [dragging, setDragging] = useState(false)
   const [params, setParams] = useState<RAGParams>(DEFAULT_PARAMS)
-  const [ingestingFile, setIngestingFile] = useState<string | null>(null)
+  const [modal, setModal] = useState<ModalState>(MODAL_INIT)
   const [queryText, setQueryText] = useState('')
   const [queryResults, setQueryResults] = useState<{ text: string; score: string; source: string }[]>([])
   const [querying, setQuerying] = useState(false)
+
+  const mUpdate = (progress: number, statusMsg: string) =>
+    setModal(m => ({ ...m, progress, statusMsg }))
+  const mDone = (statusMsg: string) =>
+    setModal(m => ({ ...m, progress: 100, statusMsg, phase: 'done' }))
+  const mError = (statusMsg: string) =>
+    setModal(m => ({ ...m, statusMsg, phase: 'error' }))
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Load file list from backend on mount
@@ -94,6 +110,9 @@ const KnowledgePage: React.FC = () => {
       }
       setFiles(prev => [newFile, ...prev.filter(f => f.name !== file.name)])
 
+      // 打开弹窗
+      setModal({ open: true, filename: file.name, progress: 15, statusMsg: `正在上传「${file.name}」…`, phase: 'processing' })
+
       try {
         // 1. Upload
         const fd = new FormData()
@@ -103,7 +122,7 @@ const KnowledgePage: React.FC = () => {
         if (!r.ok) throw new Error(data.error || '上传失败')
 
         // 2. Ingest via SSE
-        setIngestingFile(file.name)
+        mUpdate(30, `「${file.name}」上传成功，正在 AI 清洗入库…`)
         const resp = await fetch('/ingest', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -121,20 +140,25 @@ const KnowledgePage: React.FC = () => {
           for (const line of lines) {
             if (!line.startsWith('data:')) continue
             const evt = JSON.parse(line.slice(5).trim())
-            if (evt.type === 'result') {
+            if (evt.type === 'reading') {
+              mUpdate(50, evt.message || '正在读取文件…')
+            } else if (evt.type === 'cleaning') {
+              mUpdate(70, evt.message || 'AI 清洗中…')
+            } else if (evt.type === 'storing') {
+              mUpdate(85, evt.message || '正在写入知识库…')
+            } else if (evt.type === 'result') {
               setFiles(prev => prev.map(f => f.name === file.name ? { ...f, status: 'ready' } : f))
-              showToast(`${file.name} 入库成功（${evt.chunks_stored} 块）`)
+              mDone(`「${file.name}」已成功写入知识库 ✓`)
             } else if (evt.type === 'error') {
               setFiles(prev => prev.map(f => f.name === file.name ? { ...f, status: 'error' } : f))
-              showToast(evt.message, 'error')
+              mError(evt.message || '清洗失败')
             }
           }
         }
       } catch (e: unknown) {
-        showToast(e instanceof Error ? e.message : '上传失败', 'error')
+        const msg = e instanceof Error ? e.message : '上传失败'
         setFiles(prev => prev.map(f => f.name === file.name ? { ...f, status: 'error' } : f))
-      } finally {
-        setIngestingFile(null)
+        mError(msg)
       }
     }
   }, [files, showToast])
@@ -186,7 +210,7 @@ const KnowledgePage: React.FC = () => {
           <h1 className="text-lg font-semibold text-[#171717]">知识库管理</h1>
           <p className="text-xs text-[#9ca3af] mt-0.5 flex items-center gap-1">
             <Database size={11} />
-            qwen3-max 清洗 · text-embedding-v4 · BM25 混合 · gte-rerank-v2
+            deepseek-v4-pro 清洗 · BAAI/bge-large-zh-v1.5 · BM25 混合 · gte-rerank-v2
           </p>
         </div>
       </div>
@@ -217,12 +241,6 @@ const KnowledgePage: React.FC = () => {
             </div>
             <input ref={fileInputRef} type="file" multiple accept=".txt,.md,.rst,.html"
               className="hidden" onChange={e => e.target.files && handleFiles(e.target.files)} />
-            {ingestingFile && (
-              <p className="mt-3 text-xs text-[#3b82f6] flex items-center gap-1.5">
-                <Loader2 size={12} className="animate-spin" />
-                正在清洗入库：{ingestingFile}
-              </p>
-            )}
           </div>
 
           {/* File list */}
@@ -302,7 +320,7 @@ const KnowledgePage: React.FC = () => {
                   <SliderRow label="Top K" value={params.topK} min={1} max={50} onChange={v => setParam('topK', v)} />
                   <SliderRow label="BM25 权重" value={params.bm25Weight} min={0} max={1} step={0.05}
                     onChange={v => setParam('bm25Weight', v)} />
-                  <SliderRow label="BM25 K" value={params.bm25K} min={0.1} max={2} step={0.1}
+                  <SliderRow label="BM25 K" value={params.bm25K} min={1} max={20}
                     onChange={v => setParam('bm25K', v)} />
                   <SliderRow label="向量 K" value={params.vectorK} min={1} max={20}
                     onChange={v => setParam('vectorK', v)} />
@@ -366,6 +384,48 @@ const KnowledgePage: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* ── 上传进度弹窗 ─────────────────────────────────────────── */}
+      {modal.open && (
+        <div className="fixed inset-0 bg-black/45 z-50 flex items-center justify-center">
+          <div className="bg-white rounded-2xl shadow-2xl p-8 w-[440px] max-w-[92vw]">
+            <p className="text-base font-bold text-[#111827] mb-1">文件处理中</p>
+            <p className="text-sm text-[#6b7280] mb-6 truncate">{modal.filename}</p>
+
+            {/* 进度条 */}
+            <div className="h-1.5 bg-[#e5e7eb] rounded-full overflow-hidden mb-3">
+              <div
+                className={`h-full rounded-full transition-all duration-300 ease-out ${
+                  modal.phase === 'done'  ? 'bg-green-500' :
+                  modal.phase === 'error' ? 'bg-red-500'   : 'bg-[#3b82f6]'
+                }`}
+                style={{ width: `${modal.progress}%` }}
+              />
+            </div>
+
+            {/* 状态文字 */}
+            <div className={`flex items-center gap-2 text-sm min-h-[20px] mb-7 ${
+              modal.phase === 'done'  ? 'text-green-600' :
+              modal.phase === 'error' ? 'text-red-600'   : 'text-[#374151]'
+            }`}>
+              {modal.phase === 'processing' && <Loader2 size={14} className="animate-spin shrink-0 text-[#3b82f6]" />}
+              <span>{modal.statusMsg}</span>
+            </div>
+
+            {/* 确认按钮 */}
+            <div className="flex justify-end">
+              <button
+                disabled={modal.phase === 'processing'}
+                onClick={() => setModal(MODAL_INIT)}
+                className="px-6 py-2 rounded-lg text-sm font-semibold bg-[#3b82f6] text-white
+                  hover:bg-[#2563eb] disabled:bg-[#93c5fd] disabled:cursor-not-allowed transition-colors"
+              >
+                确认
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

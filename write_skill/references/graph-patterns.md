@@ -32,31 +32,50 @@ else:
 
 ```
 qa/
-├── prompts.py   # EXTRACT_SYSTEM, GENERATE_SYSTEM, GENERATE_FALLBACK_SYSTEM
-├── nodes.py     # extract_keywords_node, retrieve_node, generate_node
+├── prompts.py   # EXTRACT_SYSTEM, build_generate_system()
+├── nodes.py     # call_tools_node, extract_keywords_node, retrieve_node, generate_node
 ├── edges.py     # after_extract (rag_fn None → skip retrieve)
 └── build.py     # build_qa_graph()
 ```
 
-state：`ChatState{query, history, chat_cfg, rag_fn, top_k, score_threshold, keywords, hits, full_text, error}`
+图流程：`START → call_tools → extract_keywords → retrieve? → generate → END`
+
+state：`ChatState{query, history, chat_cfg, rag_fn, top_k, score_threshold, skill_system_prompt, skill_table, keywords, hits, tool_results, full_text, error}`
 
 **调用方式（流式 stream）**：
 ```python
 from agent_service.graph import build_qa_graph
+from agent_service.skill_loader import detect_skill, build_skill_table
+
+skill = detect_skill(message)
 
 state = {
     "query": message,
-    "history": history,        # [{role, content}, ...]
+    "history": history,               # [{role, content}, ...]
     "chat_cfg": chat_cfg,
-    "rag_fn": rag_fn,          # callable (q, k) -> list
+    "rag_fn": rag_fn,                 # callable (q, k) -> list
     "top_k": 5,
-    "score_threshold": 0.3,    # 低于该分时忽略命中，用 GENERATE_FALLBACK_SYSTEM 兜底
+    "score_threshold": 0.3,
+    "skill_system_prompt": skill.system_prompt if skill else "",
+    "skill_table": build_skill_table(),
 }
 
 for event in build_qa_graph().stream(state, stream_mode="custom"):
     # event 直接就是节点 writer() 推出的 dict
     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 ```
+
+## generate 系统提示组装（`prompts.py: build_generate_system`）
+
+`generate_node` 调 `build_generate_system(skill_prompt, context, tool_results, skill_table, has_hits, tool_table)` 组装 system prompt，顺序：
+
+1. **角色/片段层**：按 (是否命中 skill) × (RAG 是否命中) 四情形选模板。
+2. **系统可用能力块（常驻，所有情形都注入）**：`CAPABILITIES_PREFIX` 拼入
+   - `skill_table` —— `skill_loader.build_skill_table()`（L1 知识领域表，从 state 传入）
+   - `tool_table` —— `builtin_tools.build_tool_table()`（内置工具清单，`generate_node` 内 lazy import 获取）
+3. **工具结果层**：若 `tool_results` 非空，追加 `TOOL_RESULTS_PREFIX` + 结果。
+
+> 加新内置工具会自动出现在 tool_table，无需改提示词；新增 skill 自动进 skill_table。两张表都不进 `call_tools_node`（那里靠 `bind_tools` 暴露工具），只进 generate 的 system prompt。
 
 ## 节点推自定义事件的方式
 
@@ -86,7 +105,7 @@ def extract_keywords_node(state):
    g.add_edge("retrieve", "rerank")     # 替换原来的 retrieve→generate
    g.add_edge("rerank", "generate")
    ```
-4. 如果新事件类型，去 `web/user.html` + `web/admin/chat.html` 的 SSE 消费者里加 `else if (evt.type === "rerank_start") {...}`
+4. 如果新事件类型，去 `web/user.html`（用户端）+ `web-admin/src/pages/ChatPage.tsx`（管理员端 React）的 SSE 消费者里加 `else if (evt.type === "rerank_start") {...}`
 
 ## 加子图的步骤
 
@@ -96,6 +115,43 @@ def extract_keywords_node(state):
 2. 写 `nodes.py` / `edges.py` / `build.py` / `__init__.py`，照 cleaning 的样子
 3. 在 `agent_service/graph/state.py` 加新 TypedDict（不要和现有 state 复用）
 4. 在 `agent_service/graph/__init__.py` 导出 `build_<name>_graph`
+
+## 加内置工具的步骤
+
+内置工具供 `call_tools_node` 使用，LLM 在每次对话开始时按需调用（工具调用在 extract_keywords 之前执行）。
+
+1. 在 `agent_service/mcp/builtin_tools.py` 加 `@tool` 函数：
+   ```python
+   @tool
+   def my_tool(param: str) -> str:
+       """工具说明（LLM 根据这段描述决定是否调用）。
+
+       Args:
+           param: 参数说明
+       Returns:
+           结果说明
+       """
+       # 实现
+       return result
+   ```
+2. 将函数追加到 `BUILTIN_TOOLS`：
+   ```python
+   BUILTIN_TOOLS = [get_current_time, load_policy_file, my_tool]
+   ```
+3. 工具内 import `api.services` / `agent_service` 模块时必须做**函数内 lazy import**（避免循环依赖）：
+   ```python
+   def my_tool(...):
+       from agent_service import SKILLS_ROOT   # 函数内 import，OK
+       ...
+   ```
+4. 不需要改 `call_tools_node`：节点自动遍历 `BUILTIN_TOOLS` 列表执行工具。
+5. 工具结果会通过 `TOOL_RESULTS_PREFIX` 拼入 generate_node 的 system prompt，格式：
+   ```
+   ──── 工具查询结果 ────
+   <tool_name>: <result_text>
+   ```
+
+**`load_policy_file` 的特殊约定**：只有在 `skill_system_prompt` 里存在文档地图时模型才会调用它。文档地图必须包含 `skill_name`（等于 skill 目录名）和 `filename`（含 `.md` 后缀）。
 
 ## 节点写作约定
 

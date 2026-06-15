@@ -1,10 +1,11 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import {
-  Send, Trash2, Bot, User, AlertCircle, Star,
+  Send, Square, Trash2, Bot, User, AlertCircle, Star,
   Plus, MessageSquare, Pencil, X, Check, Copy, ChevronDown,
   Circle, UserCircle,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useApp } from '../context/AppContext'
 import type { ChatMessage } from '../types'
 
@@ -35,27 +36,53 @@ interface MsgItem extends ChatMessage {
   time?: string
 }
 
+// 每个并行对话标签的独立状态
+interface TabState {
+  tabId: string
+  convId?: string
+  convUserId?: number
+  title: string
+  sub: string
+  input: string
+  messages: MsgItem[]
+  streaming: boolean
+  thinking: boolean
+  feedbackOpen: boolean
+  feedbackExpanded: boolean
+  feedbackComment: string
+  rating: number
+}
+
+const blankTab = (): TabState => ({
+  tabId: genId(),
+  convId: undefined,
+  convUserId: undefined,
+  title: 'Agent 对话',
+  sub: '基于知识库回答业务问题',
+  input: '',
+  messages: [],
+  streaming: false,
+  thinking: false,
+  feedbackOpen: false,
+  feedbackExpanded: false,
+  feedbackComment: '',
+  rating: 0,
+})
+
 const ChatPage: React.FC = () => {
   const { showToast, auth } = useApp()
   const myUserId = auth?.user_id
 
-  const [messages, setMessages] = useState<MsgItem[]>([])
-  const [input, setInput] = useState('')
-  const [streaming, setStreaming] = useState(false)
-  const [thinking, setThinking] = useState(false)
-  const [convId, setConvId] = useState<string | undefined>()
-  const [convUserId, setConvUserId] = useState<number | undefined>()   // 当前会话的归属用户
-  const [convTitle, setConvTitle] = useState('Agent 对话')
-  const [convSub, setConvSub] = useState('基于知识库回答业务问题')
-  const [showInfo, setShowInfo] = useState(true)
-  const [rating, setRating] = useState(0)
-  const [feedbackOpen, setFeedbackOpen] = useState(false)
-  const [feedbackExpanded, setFeedbackExpanded] = useState(false)
-  const [feedbackComment, setFeedbackComment] = useState('')
-  const [copied, setCopied] = useState<string | null>(null)
+  // 多对话并行：每个 tab 维护独立的消息流/状态，互不阻塞
+  const [tabs, setTabs] = useState<Record<string, TabState>>(() => {
+    const t = blankTab()
+    return { [t.tabId]: t }
+  })
+  const [tabOrder, setTabOrder] = useState<string[]>(() => Object.keys(tabs))
+  const [activeTabId, setActiveTabId] = useState<string>(() => tabOrder[0])
 
-  // 只读模式：查看他人会话时为 true，禁止发消息
-  const readOnly = convUserId !== undefined && myUserId !== undefined && convUserId !== myUserId
+  const [showInfo, setShowInfo] = useState(true)
+  const [copied, setCopied] = useState<string | null>(null)
 
   // KB status
   const [kbStatus, setKbStatus] = useState<'checking' | 'ready' | 'empty' | 'error'>('checking')
@@ -63,7 +90,8 @@ const ChatPage: React.FC = () => {
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const abortRef = useRef<(() => void) | null>(null)
+  // 每个 tab 一个中断函数，后台流不受标签切换影响
+  const abortRefs = useRef<Record<string, () => void>>({})
 
   // Conversation sidebar
   const [convList, setConvList] = useState<ConvMeta[]>([])
@@ -71,9 +99,20 @@ const ChatPage: React.FC = () => {
   const [renameVal, setRenameVal] = useState('')
   const [userMap, setUserMap] = useState<Record<number, string>>({})
 
+  const activeTab = tabs[activeTabId]
+  const readOnly = !!activeTab?.convUserId && myUserId !== undefined && activeTab.convUserId !== myUserId
+
+  const updateTab = useCallback((tabId: string, updater: (t: TabState) => TabState) => {
+    setTabs(prev => {
+      const cur = prev[tabId]
+      if (!cur) return prev
+      return { ...prev, [tabId]: updater(cur) }
+    })
+  }, [])
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, thinking])
+  }, [activeTab?.messages, activeTab?.thinking])
 
   const checkKbStatus = useCallback(async () => {
     try {
@@ -124,8 +163,11 @@ const ChatPage: React.FC = () => {
     ta.style.height = Math.min(ta.scrollHeight, 180) + 'px'
   }
 
+  // 打开一个会话：若已在某个标签中打开则直接切换，否则新建标签加载
   const loadConversation = async (id: string) => {
-    if (streaming) { showToast('请等待当前回复完成', 'error'); return }
+    const existing = Object.values(tabs).find(t => t.convId === id)
+    if (existing) { setActiveTabId(existing.tabId); return }
+
     try {
       const res = await fetch(`/conversations/${id}`)
       if (!res.ok) throw new Error()
@@ -136,39 +178,56 @@ const ChatPage: React.FC = () => {
         content: m.content,
         time: '',
       }))
-      setMessages(msgs)
-      setConvId(id)
-      setConvUserId(data.user_id ?? undefined)
-      setConvTitle(data.title || '对话')
       const msgCount = msgs.length
       const isOther = data.user_id !== undefined && myUserId !== undefined && data.user_id !== myUserId
-      setConvSub(
-        isOther
+      const tab: TabState = {
+        ...blankTab(),
+        convId: id,
+        convUserId: data.user_id ?? undefined,
+        title: data.title || '对话',
+        sub: isOther
           ? `查看用户 #${data.user_id} 的对话 · 共 ${msgCount} 条消息${data.has_summary ? ' · 含历史摘要' : ''}`
-          : `共 ${msgCount} 条消息${data.has_summary ? ' · 含历史摘要' : ''}`
-      )
-      setFeedbackOpen(false)
-      setFeedbackExpanded(false)
-      setRating(0)
-      setFeedbackComment('')
+          : `共 ${msgCount} 条消息${data.has_summary ? ' · 含历史摘要' : ''}`,
+        messages: msgs,
+      }
+      setTabs(prev => ({ ...prev, [tab.tabId]: tab }))
+      setTabOrder(prev => [...prev, tab.tabId])
+      setActiveTabId(tab.tabId)
     } catch {
       showToast('加载对话失败', 'error')
     }
   }
 
   const newConversation = () => {
-    if (streaming) { showToast('请等待当前回复完成', 'error'); return }
-    abortRef.current?.()
-    setMessages([])
-    setConvId(undefined)
-    setConvUserId(undefined)
-    setConvTitle('Agent 对话')
-    setConvSub('基于知识库回答业务问题')
-    setFeedbackOpen(false)
-    setFeedbackExpanded(false)
-    setRating(0)
-    setFeedbackComment('')
+    const tab = blankTab()
+    setTabs(prev => ({ ...prev, [tab.tabId]: tab }))
+    setTabOrder(prev => [...prev, tab.tabId])
+    setActiveTabId(tab.tabId)
     showToast('已开始新对话')
+  }
+
+  // 关闭一个并行对话标签（中断其流式请求）
+  const closeTab = (tabId: string, e?: React.MouseEvent) => {
+    e?.stopPropagation()
+    abortRefs.current[tabId]?.()
+    delete abortRefs.current[tabId]
+    setTabs(prev => {
+      const next = { ...prev }
+      delete next[tabId]
+      return next
+    })
+    setTabOrder(prev => {
+      const next = prev.filter(id => id !== tabId)
+      if (activeTabId === tabId) {
+        setActiveTabId(next[next.length - 1] ?? '')
+        if (next.length === 0) {
+          const fresh = blankTab()
+          setTabs(p => ({ ...p, [fresh.tabId]: fresh }))
+          return [fresh.tabId]
+        }
+      }
+      return next
+    })
   }
 
   const deleteConv = async (id: string, e: React.MouseEvent) => {
@@ -176,7 +235,8 @@ const ChatPage: React.FC = () => {
     if (!confirm('确认删除此对话？')) return
     try {
       await fetch(`/conversations/${id}`, { method: 'DELETE' })
-      if (id === convId) newConversation()
+      const openTab = Object.values(tabs).find(t => t.convId === id)
+      if (openTab) closeTab(openTab.tabId)
       setConvList(prev => prev.filter(c => c.id !== id))
       showToast('对话已删除')
     } catch {
@@ -200,7 +260,13 @@ const ChatPage: React.FC = () => {
         body: JSON.stringify({ title }),
       })
       setConvList(prev => prev.map(c => c.id === id ? { ...c, title } : c))
-      if (id === convId) setConvTitle(title)
+      setTabs(prev => {
+        const next = { ...prev }
+        for (const t of Object.values(next)) {
+          if (t.convId === id) next[t.tabId] = { ...t, title }
+        }
+        return next
+      })
     } catch {
       showToast('重命名失败', 'error')
     }
@@ -213,20 +279,27 @@ const ChatPage: React.FC = () => {
     setTimeout(() => setCopied(null), 1500)
   }
 
-  const sendMessage = useCallback(async () => {
-    const text = input.trim()
-    if (!text || streaming || readOnly) return
-    setInput('')
-    if (textareaRef.current) textareaRef.current.style.height = 'auto'
+  // 发送消息：绑定到具体 tabId，后台流式更新该 tab，与当前激活标签无关
+  const sendMessage = useCallback(async (tabId: string) => {
+    const tab = tabs[tabId]
+    if (!tab) return
+    const text = tab.input.trim()
+    const isReadOnly = !!tab.convUserId && myUserId !== undefined && tab.convUserId !== myUserId
+    if (!text || tab.streaming || isReadOnly) return
 
     const userMsg: MsgItem = { id: genId(), role: 'user', content: text, time: fmtTime() }
-    setMessages(prev => [...prev, userMsg])
-    setThinking(true)
-    setStreaming(true)
+    updateTab(tabId, t => ({
+      ...t,
+      input: '',
+      messages: [...t.messages, userMsg],
+      thinking: true,
+      streaming: true,
+    }))
+    if (tabId === activeTabId && textareaRef.current) textareaRef.current.style.height = 'auto'
 
     let aborted = false
     const controller = new AbortController()
-    abortRef.current = () => { aborted = true; controller.abort() }
+    abortRefs.current[tabId] = () => { aborted = true; controller.abort() }
 
     const assistantId = genId()
     let started = false
@@ -235,7 +308,7 @@ const ChatPage: React.FC = () => {
       const resp = await fetch('/agent/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, conversation_id: convId, top_k: 5 }),
+        body: JSON.stringify({ message: text, conversation_id: tab.convId, top_k: 5 }),
         signal: controller.signal,
       })
 
@@ -262,106 +335,121 @@ const ChatPage: React.FC = () => {
             if (evt.type === 'token') {
               if (!started) {
                 started = true
-                setThinking(false)
-                setMessages(prev => [...prev, {
-                  id: assistantId, role: 'assistant', content: '', streaming: true, time: fmtTime(),
-                }])
+                updateTab(tabId, t => ({
+                  ...t,
+                  thinking: false,
+                  messages: [...t.messages, { id: assistantId, role: 'assistant', content: '', streaming: true, time: fmtTime() }],
+                }))
               }
               fullText += evt.text
-              setMessages(prev => prev.map(m =>
-                m.id === assistantId ? { ...m, content: fullText } : m
-              ))
+              updateTab(tabId, t => ({
+                ...t,
+                messages: t.messages.map(m => m.id === assistantId ? { ...m, content: fullText } : m),
+              }))
             } else if (evt.type === 'done') {
               fullText = evt.full_text ?? fullText
               if (!started) {
-                setThinking(false)
-                setMessages(prev => [...prev, {
-                  id: assistantId, role: 'assistant', content: fullText, time: fmtTime(),
-                }])
+                updateTab(tabId, t => ({
+                  ...t,
+                  thinking: false,
+                  messages: [...t.messages, { id: assistantId, role: 'assistant', content: fullText, time: fmtTime() }],
+                  feedbackOpen: true,
+                  feedbackExpanded: false,
+                }))
               } else {
-                setMessages(prev => prev.map(m =>
-                  m.id === assistantId ? { ...m, content: fullText, streaming: false } : m
-                ))
+                updateTab(tabId, t => ({
+                  ...t,
+                  messages: t.messages.map(m => m.id === assistantId ? { ...m, content: fullText, streaming: false } : m),
+                  feedbackOpen: true,
+                  feedbackExpanded: false,
+                }))
               }
-              setFeedbackOpen(true)
-              setFeedbackExpanded(false)
             } else if (evt.type === 'error') {
-              setThinking(false)
               showToast(evt.message, 'error')
               if (!started) {
-                setMessages(prev => [...prev, {
-                  id: assistantId, role: 'assistant', content: `❌ ${evt.message}`, time: fmtTime(),
-                }])
+                updateTab(tabId, t => ({
+                  ...t,
+                  thinking: false,
+                  messages: [...t.messages, { id: assistantId, role: 'assistant', content: `❌ ${evt.message}`, time: fmtTime() }],
+                }))
               } else {
-                setMessages(prev => prev.map(m =>
-                  m.id === assistantId ? { ...m, content: `❌ ${evt.message}`, streaming: false } : m
-                ))
+                updateTab(tabId, t => ({
+                  ...t,
+                  thinking: false,
+                  messages: t.messages.map(m => m.id === assistantId ? { ...m, content: `❌ ${evt.message}`, streaming: false } : m),
+                }))
               }
             } else if (evt.type === 'conversation_saved') {
               const newId = evt.conversation_id
-              setConvId(newId)
-              if (evt.title) setConvTitle(evt.title)
+              updateTab(tabId, t => ({ ...t, convId: newId, title: evt.title || t.title }))
               loadConvList()
             }
           } catch { /* ignore parse errors */ }
         }
       }
     } catch (e: unknown) {
-      setThinking(false)
       if (!aborted) {
         const msg = e instanceof Error ? e.message : '连接失败'
         showToast(msg, 'error')
         if (!started) {
-          setMessages(prev => [...prev, {
-            id: assistantId, role: 'assistant', content: `❌ ${msg}`, time: fmtTime(),
-          }])
+          updateTab(tabId, t => ({
+            ...t,
+            thinking: false,
+            messages: [...t.messages, { id: assistantId, role: 'assistant', content: `❌ ${msg}`, time: fmtTime() }],
+          }))
         } else {
-          setMessages(prev => prev.map(m =>
-            m.id === assistantId ? { ...m, content: `❌ ${msg}`, streaming: false } : m
-          ))
+          updateTab(tabId, t => ({
+            ...t,
+            thinking: false,
+            messages: t.messages.map(m => m.id === assistantId ? { ...m, content: `❌ ${msg}`, streaming: false } : m),
+          }))
         }
       }
     } finally {
-      setThinking(false)
-      setStreaming(false)
-      abortRef.current = null
-      setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, streaming: false } : m))
+      delete abortRefs.current[tabId]
+      updateTab(tabId, t => ({
+        ...t,
+        thinking: false,
+        streaming: false,
+        messages: t.messages.map(m => m.id === assistantId
+          ? { ...m, streaming: false, content: aborted && m.content ? `${m.content}\n\n*[已停止]*` : m.content }
+          : m),
+      }))
     }
-  }, [input, streaming, convId, showToast, loadConvList])
+  }, [tabs, activeTabId, showToast, loadConvList, updateTab, myUserId])
 
   const handleKey = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() }
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      if (activeTab.streaming) return
+      sendMessage(activeTabId)
+    }
   }
 
   const clearChat = () => {
-    abortRef.current?.()
-    setMessages([])
-    setConvId(undefined)
-    setConvUserId(undefined)
-    setConvTitle('Agent 对话')
-    setConvSub('基于知识库回答业务问题')
-    setFeedbackOpen(false)
-    setFeedbackExpanded(false)
-    setRating(0)
-    setFeedbackComment('')
+    abortRefs.current[activeTabId]?.()
+    delete abortRefs.current[activeTabId]
+    const fresh = blankTab()
+    fresh.tabId = activeTabId // 保留标签位置
+    setTabs(prev => ({ ...prev, [activeTabId]: fresh }))
     showToast('对话已清空')
   }
 
   const submitFeedback = async () => {
-    if (!messages.length) return
-    if (rating < 1) { showToast('请先选择评分星级', 'error'); return }
-    const history = messages.map(m => ({ role: m.role, content: m.content }))
+    const tab = tabs[activeTabId]
+    if (!tab || !tab.messages.length) return
+    if (tab.rating < 1) { showToast('请先选择评分星级', 'error'); return }
+    const history = tab.messages.map(m => ({ role: m.role, content: m.content }))
     try {
       const r = await fetch('/feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rating, comment: feedbackComment, history, conversation_id: convId || '' }),
+        body: JSON.stringify({ rating: tab.rating, comment: tab.feedbackComment, history, conversation_id: tab.convId || '' }),
       })
       if (!r.ok) { showToast('提交失败', 'error'); return }
     } catch { showToast('提交失败', 'error'); return }
     showToast('感谢您的反馈！')
-    setFeedbackExpanded(false)
-    setFeedbackOpen(false)
+    updateTab(activeTabId, t => ({ ...t, feedbackExpanded: false, feedbackOpen: false }))
   }
 
   // Group conversations by date
@@ -396,12 +484,13 @@ const ChatPage: React.FC = () => {
   const ConvItem = ({ conv }: { conv: ConvMeta }) => {
     const isOtherUser = conv.user_id !== undefined && myUserId !== undefined && conv.user_id !== myUserId
     const ownerName = conv.user_id !== undefined ? (userMap[conv.user_id] ?? `#${conv.user_id}`) : null
+    const isOpen = Object.values(tabs).some(t => t.convId === conv.id)
 
     return (
       <div
         onClick={() => loadConversation(conv.id)}
         className={`group mx-2 mb-0.5 px-2.5 py-2 rounded-lg cursor-pointer transition-colors relative
-          ${conv.id === convId ? 'bg-[#eff6ff]' : 'hover:bg-[#f0f0f0]'}`}
+          ${isOpen ? 'bg-[#eff6ff]' : 'hover:bg-[#f0f0f0]'}`}
       >
         {renamingId === conv.id ? (
           <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
@@ -422,8 +511,8 @@ const ChatPage: React.FC = () => {
         ) : (
           <>
             <div className="flex items-start gap-1.5">
-              <MessageSquare size={12} className={`mt-0.5 shrink-0 ${conv.id === convId ? 'text-[#3b82f6]' : 'text-[#9ca3af]'}`} />
-              <span className={`text-xs leading-snug line-clamp-2 flex-1 min-w-0 ${conv.id === convId ? 'text-[#1d4ed8] font-medium' : 'text-[#374151]'}`}>
+              <MessageSquare size={12} className={`mt-0.5 shrink-0 ${isOpen ? 'text-[#3b82f6]' : 'text-[#9ca3af]'}`} />
+              <span className={`text-xs leading-snug line-clamp-2 flex-1 min-w-0 ${isOpen ? 'text-[#1d4ed8] font-medium' : 'text-[#374151]'}`}>
                 {conv.title || '新对话'}
               </span>
             </div>
@@ -455,6 +544,8 @@ const ChatPage: React.FC = () => {
       </div>
     )
   }
+
+  if (!activeTab) return null
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -489,19 +580,50 @@ const ChatPage: React.FC = () => {
 
       {/* ── Chat Area ── */}
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+        {/* 并行对话标签栏 */}
+        <div className="flex items-center gap-1 px-3 pt-2 border-b border-[#e5e5e5] bg-white overflow-x-auto scrollbar-thin">
+          {tabOrder.map(tid => {
+            const t = tabs[tid]
+            if (!t) return null
+            return (
+              <div
+                key={tid}
+                onClick={() => setActiveTabId(tid)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-t-lg text-xs cursor-pointer max-w-[160px] shrink-0 border-b-2 transition-colors
+                  ${tid === activeTabId ? 'border-[#3b82f6] text-[#1d4ed8] bg-[#eff6ff] font-medium' : 'border-transparent text-[#6b6b6b] hover:bg-[#f5f5f5]'}`}
+              >
+                {t.streaming && <Circle size={6} className="fill-current text-[#3b82f6] animate-pulse shrink-0" />}
+                <span className="truncate">{t.title}</span>
+                {tabOrder.length > 1 && (
+                  <button onClick={e => closeTab(tid, e)} className="text-[#9ca3af] hover:text-red-500 shrink-0">
+                    <X size={11} />
+                  </button>
+                )}
+              </div>
+            )
+          })}
+          <button
+            onClick={newConversation}
+            title="新建并行对话"
+            className="flex items-center justify-center w-6 h-6 mb-1 rounded text-[#9ca3af] hover:text-[#3b82f6] hover:bg-[#f0f5ff] shrink-0"
+          >
+            <Plus size={13} />
+          </button>
+        </div>
+
         {/* Topbar */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-[#e5e5e5] bg-white">
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-lg font-semibold text-[#171717]">{convTitle}</h1>
-              {readOnly && convUserId !== undefined && (
+              <h1 className="text-lg font-semibold text-[#171717]">{activeTab.title}</h1>
+              {readOnly && activeTab.convUserId !== undefined && (
                 <span className="flex items-center gap-1 text-xs text-[#7c3aed] bg-[#f5f3ff] border border-[#ede9fe] px-2 py-0.5 rounded-full">
                   <UserCircle size={13} />
-                  {userMap[convUserId] ?? `用户 #${convUserId}`} 的对话
+                  {userMap[activeTab.convUserId] ?? `用户 #${activeTab.convUserId}`} 的对话
                 </span>
               )}
             </div>
-            <p className="text-xs text-[#9ca3af] mt-0.5">{convSub}</p>
+            <p className="text-xs text-[#9ca3af] mt-0.5">{activeTab.sub}</p>
           </div>
           <button onClick={clearChat} className="flex items-center gap-1.5 text-sm text-[#6b6b6b] hover:text-red-500 transition-colors">
             <Trash2 size={15} /> 清空对话
@@ -512,14 +634,14 @@ const ChatPage: React.FC = () => {
         {showInfo && (
           <div className="mx-6 mt-4 flex items-center gap-3 bg-blue-50 border border-blue-100 rounded-xl px-4 py-3">
             <AlertCircle size={15} className="text-blue-400 shrink-0" />
-            <p className="text-xs text-blue-600 flex-1">当前使用全局模型配置，可在「系统设置」中调整。管理员可查看完整会话历史。</p>
+            <p className="text-xs text-blue-600 flex-1">当前使用全局模型配置，可在「系统设置」中调整。管理员可查看完整会话历史，并可同时打开多个对话并行对话。</p>
             <button onClick={() => setShowInfo(false)} className="text-blue-300 hover:text-blue-500 text-lg leading-none">×</button>
           </div>
         )}
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto scrollbar-thin px-6 py-5 flex flex-col gap-5">
-          {messages.length === 0 && !thinking && (
+          {activeTab.messages.length === 0 && !activeTab.thinking && (
             <div className="flex-1 flex flex-col items-center justify-center text-center py-20">
               <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-[#3b82f6] to-[#6366f1] flex items-center justify-center mb-4 shadow-lg">
                 <Bot size={28} className="text-white" />
@@ -529,7 +651,7 @@ const ChatPage: React.FC = () => {
             </div>
           )}
 
-          {messages.map(msg => (
+          {activeTab.messages.map(msg => (
             <div key={msg.id} className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
               <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-0.5
                 ${msg.role === 'user' ? 'bg-[#f3f4f6]' : 'bg-gradient-to-br from-[#3b82f6] to-[#6366f1]'}`}>
@@ -543,7 +665,7 @@ const ChatPage: React.FC = () => {
                   : 'bg-white border border-[#e5e5e5] text-[#171717]'}`}>
                   {msg.role === 'assistant'
                     ? <div className="prose-chat">
-                        <ReactMarkdown>{msg.content || (msg.streaming ? '…' : '')}</ReactMarkdown>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content || (msg.streaming ? '…' : '')}</ReactMarkdown>
                         {msg.streaming && <span className="inline-block w-1.5 h-4 bg-[#3b82f6] ml-0.5 animate-pulse rounded-sm" />}
                       </div>
                     : msg.content}
@@ -565,7 +687,7 @@ const ChatPage: React.FC = () => {
           ))}
 
           {/* Thinking animation */}
-          {thinking && (
+          {activeTab.thinking && (
             <div className="flex gap-3">
               <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#3b82f6] to-[#6366f1] flex items-center justify-center shrink-0 mt-0.5">
                 <Bot size={15} className="text-white" />
@@ -591,26 +713,26 @@ const ChatPage: React.FC = () => {
         </div>
 
         {/* Feedback */}
-        {feedbackOpen && messages.length > 0 && (
+        {activeTab.feedbackOpen && activeTab.messages.length > 0 && (
           <div className="mx-6 mb-2 border border-[#e5e5e5] rounded-xl bg-white overflow-hidden">
             <button
-              onClick={() => setFeedbackExpanded(v => !v)}
+              onClick={() => updateTab(activeTabId, t => ({ ...t, feedbackExpanded: !t.feedbackExpanded }))}
               className="w-full flex items-center gap-2 px-4 py-2.5 text-xs text-[#6b6b6b] hover:bg-[#f7f7f8] transition-colors"
             >
-              <ChevronDown size={13} className={`transition-transform ${feedbackExpanded ? 'rotate-180' : ''}`} />
+              <ChevronDown size={13} className={`transition-transform ${activeTab.feedbackExpanded ? 'rotate-180' : ''}`} />
               对本轮回答的反馈（选填）
             </button>
-            {feedbackExpanded && (
+            {activeTab.feedbackExpanded && (
               <div className="px-4 pb-4 border-t border-[#f0f0f0]">
                 <div className="flex items-center gap-1 my-3">
                   {[1, 2, 3, 4, 5].map(s => (
-                    <button key={s} onClick={() => setRating(s)}>
-                      <Star size={18} className={s <= rating ? 'text-amber-400 fill-amber-400' : 'text-[#d1d5db]'} />
+                    <button key={s} onClick={() => updateTab(activeTabId, t => ({ ...t, rating: s }))}>
+                      <Star size={18} className={s <= activeTab.rating ? 'text-amber-400 fill-amber-400' : 'text-[#d1d5db]'} />
                     </button>
                   ))}
                 </div>
                 <div className="flex gap-2">
-                  <input value={feedbackComment} onChange={e => setFeedbackComment(e.target.value)}
+                  <input value={activeTab.feedbackComment} onChange={e => updateTab(activeTabId, t => ({ ...t, feedbackComment: e.target.value }))}
                     placeholder="补充说明（可选）：指出错误、提供正确答案"
                     className="flex-1 px-3 py-1.5 border border-[#e5e5e5] rounded-lg text-xs focus:outline-none focus:border-[#3b82f6]" />
                   <button onClick={submitFeedback}
@@ -649,21 +771,25 @@ const ChatPage: React.FC = () => {
               <div className="border border-[#e5e5e5] rounded-2xl bg-white shadow-sm overflow-hidden focus-within:border-[#3b82f6] transition-colors">
                 <textarea
                   ref={textareaRef}
-                  value={input}
-                  onChange={e => { setInput(e.target.value); autoResize() }}
+                  value={activeTab.input}
+                  onChange={e => { updateTab(activeTabId, t => ({ ...t, input: e.target.value })); autoResize() }}
                   onKeyDown={handleKey}
-                  placeholder="输入消息，Enter 发送，Shift+Enter 换行…"
+                  placeholder="输入消息，Enter 发送，Shift+Enter 换行…（可新建标签并行进行多个对话）"
                   rows={1}
                   className="w-full px-4 pt-3 pb-2 text-sm text-[#171717] resize-none focus:outline-none placeholder:text-[#9ca3af] bg-transparent"
                   style={{ minHeight: '44px', maxHeight: '180px' }}
                 />
                 <div className="flex items-center justify-end px-3 pb-3">
                   <button
-                    onClick={sendMessage}
-                    disabled={!input.trim() || streaming}
-                    className="w-8 h-8 flex items-center justify-center bg-[#3b82f6] hover:bg-[#2563eb] disabled:opacity-30 text-white rounded-lg transition-all"
+                    onClick={() => {
+                      if (activeTab.streaming) { abortRefs.current[activeTabId]?.(); return }
+                      sendMessage(activeTabId)
+                    }}
+                    disabled={!activeTab.streaming && !activeTab.input.trim()}
+                    title={activeTab.streaming ? '停止生成' : '发送'}
+                    className={`w-8 h-8 flex items-center justify-center text-white rounded-lg transition-all disabled:opacity-30 ${activeTab.streaming ? 'bg-red-500 hover:bg-red-600' : 'bg-[#3b82f6] hover:bg-[#2563eb]'}`}
                   >
-                    <Send size={14} />
+                    {activeTab.streaming ? <Square size={12} className="fill-current" /> : <Send size={14} />}
                   </button>
                 </div>
               </div>

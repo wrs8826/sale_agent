@@ -38,6 +38,7 @@ ADMIN_DIST = _PROJECT_ROOT / "web-admin" / "dist"
 
 def create_app() -> Flask:
     app = Flask(__name__, static_folder=None)
+    app.config["IS_ADMIN_APP"] = True
     app.secret_key = os.getenv("ADMIN_SECRET_KEY", "admin-app-secret-key-change-in-prod")
     configure_session(app, key_prefix="admin_sess:")
 

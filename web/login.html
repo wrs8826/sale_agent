@@ -109,7 +109,7 @@
 
 <header>
   <h1>销售 Agent</h1>
-  <span class="tag">qwen3-max · 混合检索 · LangGraph</span>
+  <span class="tag">deepseek-v4-pro · 混合检索 · LangGraph</span>
 </header>
 
 <main>
@@ -162,6 +162,12 @@
 </main>
 
 <script>
+  /* ── 被封禁跳转提示 ── */
+  if (new URLSearchParams(window.location.search).get('banned') === '1') {
+    document.getElementById('login-msg').textContent = '该账号已被封禁，请联系管理员';
+    history.replaceState(null, '', window.location.pathname);
+  }
+
   /* ── tab 切换 ── */
   const tabBtns = document.querySelectorAll('.tab-btn');
   const panels  = document.querySelectorAll('.panel');

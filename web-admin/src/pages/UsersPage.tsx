@@ -224,6 +224,7 @@ const UsersPage: React.FC = () => {
   const [modal, setModal] = useState<EditModal | null>(null)
   const [addOpen, setAddOpen] = useState(false)
   const [deleteId, setDeleteId] = useState<number | null>(null)
+  const [banUser, setBanUser] = useState<User | null>(null)
   const [editDraft, setEditDraft] = useState<Partial<User>>({})
   const [newUser, setNewUser] = useState({ username: '', phone: '', department: '', password: '' })
   const [modelUser, setModelUser] = useState<User | null>(null)
@@ -368,7 +369,7 @@ const UsersPage: React.FC = () => {
                       className="text-[#9ca3af] hover:text-[#3b82f6] transition-colors"><Edit3 size={14} /></button>
                     <button onClick={() => setModelUser(u)} title="专属模型配置"
                       className="text-[#9ca3af] hover:text-green-600 transition-colors"><Settings2 size={14} /></button>
-                    <button onClick={() => toggleBan(u)} title={u.is_banned ? '解封' : '封禁'}
+                    <button onClick={() => u.is_banned ? toggleBan(u) : setBanUser(u)} title={u.is_banned ? '解封' : '封禁'}
                       className={`transition-colors ${u.is_banned ? 'text-green-400 hover:text-green-600' : 'text-[#9ca3af] hover:text-amber-500'}`}>
                       <ShieldAlert size={14} />
                     </button>
@@ -500,6 +501,29 @@ const UsersPage: React.FC = () => {
             ))
           }}
         />
+      )}
+
+      {/* Ban Confirm */}
+      {banUser !== null && (
+        <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4" onClick={() => setBanUser(null)}>
+          <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl text-center" onClick={e => e.stopPropagation()}>
+            <div className="w-12 h-12 rounded-full bg-amber-50 flex items-center justify-center mx-auto mb-4">
+              <ShieldAlert size={20} className="text-amber-500" />
+            </div>
+            <h2 className="text-base font-semibold text-[#171717] mb-2">确认封禁</h2>
+            <p className="text-sm text-[#6b6b6b] mb-6">封禁后 <span className="font-medium text-[#171717]">{banUser.username}</span> 将无法登录，当前会话也会被强制登出。</p>
+            <div className="flex gap-2">
+              <button onClick={() => setBanUser(null)}
+                className="flex-1 px-4 py-2 border border-[#e5e5e5] rounded-lg text-sm text-[#6b6b6b] hover:bg-[#f7f7f8] transition-colors">
+                取消
+              </button>
+              <button onClick={() => { toggleBan(banUser); setBanUser(null) }}
+                className="flex-1 px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-sm font-medium transition-colors">
+                封禁
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Delete Confirm */}

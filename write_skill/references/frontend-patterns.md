@@ -1,5 +1,51 @@
 # 前端模式
 
+## Markdown 渲染
+
+| 端 | 实现 |
+|---|---|
+| `web/user.html`（vanilla JS） | CDN 引入 `marked.js@9`，`renderMd(raw)` 调用 `marked.parse(raw)`；开启 `gfm: true, breaks: true` |
+| `web-admin/`（React） | `react-markdown`（v9）+ `remark-gfm` 插件（`<ReactMarkdown remarkPlugins={[remarkGfm]}>`），包在 `<div className="prose-chat">` 内，表格/删除线/任务列表等 GFM 语法依赖该插件，缺失则表格会原样显示为 Markdown 文本 |
+
+### user.html 的 renderMd
+
+```html
+<!-- </style> 前加载 CDN，保证 <script> 块执行时已就绪 -->
+<script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+```
+
+```js
+marked.use({ gfm: true, breaks: true });
+
+function renderMd(raw) {
+  if (!raw) return '';
+  // 后处理替换：不依赖 renderer API（marked v9 的 table renderer 签名已改为 token 对象，旧写法失效）
+  return marked.parse(raw)
+    .replace(/<table>/g, '<div class="table-wrap"><table>')
+    .replace(/<\/table>/g, '</table></div>');
+}
+```
+
+**注意**：marked v9 的 `Renderer` 自定义方法签名已从 `table(header, body)` 改为接收 token 对象，旧写法静默失效。用后处理字符串替换是版本无关的稳定方案。
+
+表格 CSS 关键点：`.table-wrap { overflow-x: auto }` + `table { min-width: 100%; white-space: nowrap }`，`table` 自身不能 `overflow-x`，必须由外层 div 承载滚动。
+
+支持能力：标题（h1-h6）、加粗/斜体/删除线、有序/无序列表、任务列表、代码块（含语言标注）、行内代码、表格、引用块、链接、分割线、换行。
+
+CSS 样式在 `user.html` 的 `/* Markdown */` 区块：`p / strong / em / ul / ol / li / code / pre / blockquote / h1-h6 / a / hr / table / th / td`，全部作用在 `.msg-bubble` 内。
+
+#### 消息气泡布局（避免长消息脱离头像）
+
+`.msg-row`（flex；用户行 `flex-direction: row-reverse` 把头像放右）→ `.msg-avatar` + `.msg-content`（气泡 + 时间/复制 meta 的包装）。
+⚠️ 宽度约束与对齐**放在 `.msg-content` 上**，不要放在 `.msg-bubble`：`.msg-content { max-width:76%; min-width:0 }`，用户 `align-items:flex-end`、AI `flex-start`；`.msg-bubble { max-width:100%; word-break:break-word; overflow-wrap:anywhere }`。
+若把 `max-width` 留在气泡而包装无约束/无对齐，长消息时包装撑满整行、气泡在其中左对齐，会出现「气泡贴左、头像在右、中间大空隙」。
+
+### 注意
+
+- `marked.parse()` 返回完整 HTML 字符串，直接赋给 `element.innerHTML`
+- 不需要额外的 XSS 库：AI 输出不含用户提供的原始 HTML；如有需要可接入 `DOMPurify`
+- `breaks: true` 让单个换行变 `<br>`，与旧版 `.replace(/\n/, '<br>')` 行为一致，防止段落合并
+
 ## 页面定位
 
 ### 用户端（端口 5001）
@@ -11,12 +57,18 @@
 
 ### 管理员端（端口 5002）
 
-| 页 | 路由 | 用途 |
-|---|---|---|
-| `web/admin/login.html` | `/`（未登录） | 管理员专属登录（调用 `/auth/admin-login`，只接受 admin 角色） |
-| `web/admin/knowledge.html` | `/admin` `/admin/knowledge` | 知识库管理 + RAG 调试 |
-| `web/admin/chat.html` | `/admin/chat` | 完整功能 chat |
-| `web/admin/users.html` | `/admin/users` | 用户管理：列表 / 搜索 / 编辑 / 封禁 / 删除 |
+管理员端已迁为 **React + TypeScript（`web-admin/`）**，旧的 vanilla `web/admin/*.html` 已删除。
+开发用 Vite（:5173，`vite.config.ts` 代理 API 到 Flask :5002），生产用 `web-admin/dist/`（nginx 托管）。
+
+| 页面（React） | 用途 |
+|---|---|
+| `web-admin/src/pages/LoginPage.tsx` | 管理员登录（`/auth/admin-login`，仅 admin 角色） |
+| `web-admin/src/pages/KnowledgePage.tsx` | 知识库管理 + RAG 调试 |
+| `web-admin/src/pages/ChatPage.tsx` | Agent 对话（SSE 流式 + 评分反馈） |
+| `web-admin/src/pages/UsersPage.tsx` | 用户管理：列表 / 搜索 / 编辑 / 封禁 / 删除 |
+| `web-admin/src/pages/SettingsPage.tsx` | 系统设置（5 张配置卡片） |
+
+> 详见 SKILL.md 的 `web-admin/` 模块地图与约定。
 
 > `web/index.html`（原角色选择页）已不再作为入口，仍保留文件。
 
@@ -151,6 +203,22 @@ function now()   // "14:30"
 - 拖拽 + 点击 上传区 → `POST /upload`（FormData）→ 得到 `filename`
 - 紧接着 `POST /ingest`（**必须带 `{"filename": "..."}` JSON body**）→ 消费 SSE
 - SSE 事件类型：`reading` / `cleaning` / `storing` / `result` / `error`
+
+**上传进度弹窗**：上传开始时自动弹出，处理中"确认"按钮禁用，完成/失败后按钮启用，用户点击确认后关闭。
+
+| SSE 事件 | 进度 | 说明 |
+|---|---|---|
+| 上传开始（fetch 前） | 15% | 正在上传… |
+| 上传完成（fetch 后） | 30% | 上传成功，AI 清洗中… |
+| `reading` | 50% | 正在读取文件… |
+| `cleaning` | 70% | AI 清洗中… |
+| `storing` | 85% | 正在写入知识库… |
+| `result` | 100% | 成功（绿色进度条） |
+| `error` | 当前% | 失败（红色进度条） |
+
+两端实现：
+- `web/user.html`：纯 CSS/JS 弹窗，函数 `umOpen / umUpdate / umDone / umError`，DOM 挂在 `</body>` 前
+- `web-admin/KnowledgePage.tsx`：React state `ModalState`，`modal.phase` 三态（`processing/done/error`），Tailwind 样式
 
 ```js
 const res = await fetch('/ingest', {
@@ -386,19 +454,67 @@ user.html 和 admin/chat.html 各自有一份星级反馈实现，**没有抽出
 
 ### ChatPage 布局
 
-`ChatPage.tsx` 采用 **双栏** 布局，整体占满 `h-full`：
+`ChatPage.tsx` 采用 **双栏** 布局，整体占满 `h-full`，主对话区顶部新增**并行对话标签栏**：
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │ aside 224px（对话历史侧边栏）│  主对话区（flex: 1）              │
-│  ─ [+ 新对话] 按钮          │  ─ Topbar（标题 + 清空按钮）      │
-│  ─ 分组标签                 │  ─ Info banner（可关闭）           │
-│    今天 / 昨天 /            │  ─ 消息流（overflow-y-auto）       │
-│    最近7天 / 更早           │  ─ 反馈栏（可折叠，仅有消息时显示）│
-│  ─ 会话条目                 │  ─ KB状态 + 输入框                 │
-│    (悬停：重命名 / 删除)    │                                    │
+│  ─ [+ 新对话] 按钮          │  ─ 标签栏（多个并行对话 tab + ➕） │
+│  ─ 分组标签                 │  ─ Topbar（标题 + 清空按钮）      │
+│    今天 / 昨天 /            │  ─ Info banner（可关闭）           │
+│    最近7天 / 更早           │  ─ 消息流（overflow-y-auto）       │
+│  ─ 会话条目                 │  ─ 反馈栏（可折叠，仅有消息时显示）│
+│    (悬停：重命名 / 删除)    │  ─ KB状态 + 输入框                 │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+### 多对话并行（tabs）
+
+`ChatPage.tsx` 不再是单一对话状态，而是 **每个并行对话一个 tab**：
+
+```ts
+interface TabState {
+  tabId: string
+  convId?: string
+  convUserId?: number
+  title: string
+  sub: string
+  input: string
+  messages: MsgItem[]
+  streaming: boolean
+  thinking: boolean
+  feedbackOpen: boolean
+  feedbackExpanded: boolean
+  feedbackComment: string
+  rating: number
+}
+
+const [tabs, setTabs] = useState<Record<string, TabState>>(...)
+const [tabOrder, setTabOrder] = useState<string[]>(...)
+const [activeTabId, setActiveTabId] = useState<string>(...)
+```
+
+- 所有原来的单值 state（`messages`/`convId`/`streaming`/`input`/反馈相关）都迁移到 `TabState`，通过 `updateTab(tabId, updater)` 做函数式更新。
+- `abortRefs.current: Record<tabId, () => void>` —— **每个 tab 一个中断函数**，切换 tab **不会** abort 后台流（这是与旧版的关键区别：旧版 `newConversation`/`clearChat`/`loadConversation` 都会 `abortRef.current?.()` 中断当前唯一的流）。
+- `sendMessage(tabId)` 绑定具体 tab，SSE 回调全部通过 `updateTab(tabId, ...)` 写回对应 tab，与 `activeTabId` 无关，因此可以同时有多个 tab 处于 `streaming=true`。
+- 标签栏：`streaming` 为 true 时 tab 上显示蓝色脉冲圆点；多于一个 tab 时显示关闭按钮（关闭会触发该 tab 的 abort）。
+- 侧边栏点击历史会话：先在 `tabs` 中查找 `convId` 是否已打开，已打开则 `setActiveTabId` 直接切换，否则才新建 tab 并 `GET /conversations/<id>`。
+- **思考中状态跨 tab 保持**：`TabState`/user.html 的 tab 对象都有 `thinking: boolean` 字段（请求发出到首个 token/done/error/abort 之间为 true，在 finally 中统一置回 false）。`renderTab(tabId)`/React 渲染会依据 `t.thinking` 决定是否显示"Agent 正在思考…"气泡，因此切换 tab 离开再切回时，思考气泡能正确恢复显示，而不是依赖一次性创建、切走就丢失的 DOM 节点。user.html 中 `#thinking-row` 仍是实际 DOM 节点，但其增删只在 `tabId === activeTabId` 时操作；`t.thinking` 才是跨切换保持的真实状态源，`renderTab` 开头会按 `t.thinking` 重新 `appendThinking()`。
+- **中断思考/输出（停止生成）**：发送按钮在 `activeTab.streaming` 为 true 时切换为红色停止图标（`Square`），点击调用 `abortRefs.current[activeTabId]?.()`，对应 `AbortController.abort()` 中断 SSE fetch；`Enter` 键在 streaming 时不再触发发送。中断后若已有部分输出，追加 `\n\n*[已停止]*` 标记；finally 块统一清理 `streaming=false` 与 `abortRefs`。user.html 同理，`#send-btn` 在 streaming 时显示 `.icon-stop`（红色方块）并加 `.stopping` class，点击调用 `tabs[activeTabId].abortFn?.()`。
+- `readOnly`/`feedbackOpen` 等均改为读 `activeTab.xxx`（`activeTab = tabs[activeTabId]`）。
+
+#### user.html（vanilla JS）的对应实现
+
+`web/user.html` 已按同样思路完成多对话并行改造，思路一致，命名略有差异：
+
+- 全局 `tabs = {}`（`tabId -> {tabId, convId, title, sub, messages, rating, comment, compactCount, streaming, input, abortFn}`）+ `tabOrder = []` + `activeTabId`，用 `createTab(opts)` 新建。
+- 共享 DOM（`#chat-body`/`#chat-title`/`#chat-input`/反馈栏/侧栏）通过 `renderTab(tabId)` 整体重渲染当前激活 tab 的状态；`renderTabBar()` 渲染 `#chat-tabs` 标签栏（streaming 中显示 `.tab-dot` 脉冲点，多于一个 tab 时显示关闭按钮）。
+- `doSend()` 在调用时捕获 `tabId = activeTabId`，所有 SSE 回调（`token`/`done`/`auto_compacted`/`conversation_saved`/`error`）写入 `tabs[tabId]`；仅当 `tabId === activeTabId` 时才同步操作共享 DOM（通过 `[data-msg-id]` 定位/更新消息气泡）。因此可以多个 tab 同时 `streaming=true`。
+- 每个 tab 有独立的 `abortFn`（`AbortController`），`closeTab` 会调用它中断该 tab 的流；切换 tab 不会中断后台流。
+- **发送按钮即停止按钮**：`#send-btn` 在 `streaming` 时切到红色"停止"态（`.stopping` + 切 `.icon-stop`），点击触发 `abortFn()`。⚠️ `doSend()` 启动流式时**必须把按钮设为可点的停止态**（`disabled=false` + 加 `stopping`），不能 `disabled=true`——否则同一 tab 流式期间按钮被禁用，用户无法中断（切 tab 时的 `renderTab` 复位逻辑此时不会触发）。`finally` 块负责复位为发送态。
+- `switchConversation(id)` 先在 `tabs` 中查找该 `convId` 是否已打开，已打开则 `switchTab` 直接切换，否则 `createTab` 新建并 `GET /conversations/<id>`。
+- 压缩提示计数 `_compactCounts` 由 `convId` 为 key 改为 `tabId` 为 key（`_getCount(tabId)` / `_setCount` / `_incCount`），随 tab 关闭自然释放。
+- HTML 中新增 `<div class="chat-tabs" id="chat-tabs"></div>`（位于 `.chat-header` 之前），CSS 新增 `.chat-tabs` / `.chat-tab` / `.tab-dot` / `.tab-close` / `.chat-tab-new` 等样式（含 `tab-pulse` 脉冲动画）。
 
 ### 关键实现细节
 
@@ -450,11 +566,10 @@ const kbDotColor = { checking:'bg-gray-300', ready:'bg-green-400', empty:'bg-amb
 - 提交时检查 `rating >= 1`，否则 toast 提示
 
 #### 标题更新
-`conversation_saved` 事件携带 `title` 时同步更新顶部标题：
+`conversation_saved` 事件携带 `title` 时同步更新对应 tab 的标题（注意是 `updateTab(tabId, ...)`，不是全局 state）：
 ```ts
 } else if (evt.type === 'conversation_saved') {
-  setConvId(evt.conversation_id)
-  if (evt.title) setConvTitle(evt.title)
+  updateTab(tabId, t => ({ ...t, convId: evt.conversation_id, title: evt.title || t.title }))
   loadConvList()
 }
 ```
@@ -471,8 +586,8 @@ setConvSub(isOther
 
 #### 只读模式（admin 查看他人会话）
 ```ts
-// 只读条件：当前会话的 user_id ≠ 自己的 user_id
-const readOnly = convUserId !== undefined && myUserId !== undefined && convUserId !== myUserId
+// 只读条件：当前激活 tab 的会话 user_id ≠ 自己的 user_id
+const readOnly = !!activeTab?.convUserId && myUserId !== undefined && activeTab.convUserId !== myUserId
 ```
 - `sendMessage` 函数首行加 `if (readOnly) return` 守卫
 - 输入区 DOM：`readOnly` 为 true 时替换为琥珀色警告横幅，含「新建自己的对话」快捷按钮

@@ -1,12 +1,18 @@
 """Skills 加载器：解析 skills/ 目录下的 SKILL.md，提供关键词匹配与动态系统提示。
 
 目录约定：
-    skills/<技能名>/SKILL.md             — frontmatter(name/description) + body(系统提示)
-    skills/<技能名>/references/*.md      — 参考文档（由 RAG 索引）
+    skills/<技能名>/SKILL.md             — frontmatter(name/description/triggers) + body(L2 系统提示)
+    skills/<技能名>/references/*.md      — L3 参考文档（由 RAG 索引）
 
-触发匹配：
-    description 的 frontmatter 是 YAML 字符串，其中含有触发关键词列表。
-    detect_skill(query) 对 query 做简单的 in 子串匹配，返回第一个命中的 SkillDef。
+三层披露：
+    L1  build_skill_table()   → 所有 skill 的 name + description，用于常驻注入
+    L2  SkillDef.system_prompt → 命中后注入的完整系统提示（SKILL.md body）
+    L3  references/*.md        → RAG 按需检索的深层文档
+
+触发匹配（优先级）：
+    1. frontmatter 的 triggers 列表（显式关键词，精确）
+    2. description 文本中用引号/列表条目抽取的关键词（兜底）
+    detect_skill(query) 对 query 做 in 子串匹配，返回第一个命中的 SkillDef。
 """
 from __future__ import annotations
 
@@ -20,7 +26,14 @@ from . import SKILLS_ROOT
 
 
 class SkillDef:
-    """单个 skill 的元数据 + 系统提示。"""
+    """单个 skill 的元数据 + 系统提示。
+
+    Attributes:
+        name:          skill 唯一名称（frontmatter name 或目录名）
+        description:   一行简介，用于 L1 Skill 表（frontmatter description 首行）
+        system_prompt: L2 系统提示（SKILL.md body），命中时注入 generate_node
+        refs_dir:      L3 references 目录，由 RAG 索引
+    """
 
     def __init__(
         self,
@@ -28,12 +41,18 @@ class SkillDef:
         description: str,
         system_prompt: str,
         refs_dir: Path,
+        triggers: Optional[List[str]] = None,
     ) -> None:
         self.name = name
-        self.description = description
+        # 取 description 第一行作为 L1 摘要，去除多余空白
+        self.description = description.strip().splitlines()[0].strip() if description.strip() else ""
         self.system_prompt = system_prompt.strip()
         self.refs_dir = refs_dir
-        self._keywords: List[str] = _extract_keywords(description)
+        # triggers 优先用 frontmatter 显式列表，降级到正则抽取
+        if triggers:
+            self._keywords: List[str] = [str(t).strip() for t in triggers if str(t).strip()]
+        else:
+            self._keywords = _extract_keywords(description)
 
     def matches(self, query: str) -> bool:
         """query 中包含任意一个关键词时命中。"""
@@ -106,8 +125,17 @@ def _parse_skill_md(path: Path) -> Optional[SkillDef]:
 
     name = str(meta.get("name") or path.parent.name)
     description = str(meta.get("description") or "")
+    # triggers 支持 YAML list；若缺失则传 None，由 SkillDef 降级到正则抽取
+    raw_triggers = meta.get("triggers")
+    triggers: Optional[List[str]] = list(raw_triggers) if isinstance(raw_triggers, list) else None
     refs_dir = path.parent / "references"
-    return SkillDef(name=name, description=description, system_prompt=body, refs_dir=refs_dir)
+    return SkillDef(
+        name=name,
+        description=description,
+        system_prompt=body,
+        refs_dir=refs_dir,
+        triggers=triggers,
+    )
 
 
 # ── 全局缓存 ──────────────────────────────────────────────────────────────────
@@ -150,5 +178,34 @@ def detect_skill(query: str) -> Optional[SkillDef]:
 
 
 def all_refs_dirs() -> List[Path]:
-    """返回所有 skill 的 references 目录（存在的才返回）。"""
-    return [s.refs_dir for s in load_skills() if s.refs_dir.exists()]
+    """返回所有 skill 的 references 目录（存在的才返回）。
+
+    Path 2 架构：references/ 文件由 load_policy_file 工具按需读取，
+    不再纳入 RAG 向量索引，避免不同政策文档的语义污染。
+    """
+    return []
+
+
+def build_skill_table(skills: Optional[List[SkillDef]] = None) -> str:
+    """生成 L1 Skill 注册表（Markdown 表格），供 generate_node 常驻注入。
+
+    Args:
+        skills: 可选；默认使用全局已加载的 skill 列表。
+
+    Returns:
+        Markdown 表格字符串，例如：
+          | 知识领域 | 覆盖范围 |
+          |---|---|
+          | 甬江人才政策 | 宁波市甬江人才工程（2026年度）与甬才通系统操作 |
+          ...
+        若无任何 skill，返回空字符串。
+    """
+    if skills is None:
+        skills = load_skills()
+    if not skills:
+        return ""
+    lines = ["| 知识领域 | 覆盖范围 |", "|---|---|"]
+    for s in skills:
+        desc = s.description.replace("|", "｜")  # 防止破坏表格
+        lines.append(f"| {s.name} | {desc} |")
+    return "\n".join(lines)

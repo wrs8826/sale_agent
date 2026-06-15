@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from flask import Blueprint, jsonify, request, session
+from flask import Blueprint, current_app, jsonify, request, session
 
 from agent_service import CONVERSATIONS_DIR
 from agent_service.graph import build_cleaning_graph
@@ -297,7 +297,7 @@ def _current_user_id() -> Optional[int]:
 
 
 def _is_admin() -> bool:
-    return session.get("role") == "admin"
+    return session.get("role") == "admin" and current_app.config.get("IS_ADMIN_APP", False)
 
 
 def _check_ownership(conv: Dict) -> bool:

@@ -33,7 +33,7 @@ F:/销售agent/
 
 | 路径 | 职责 |
 |---|---|
-| `__init__.py` | 暴露绝对路径常量：`CONFIG_PATH` / `DOCS_DIR` / `WIKI_DIR` / `CHROMA_DIR` / `CONVERSATIONS_DIR` / `SKILLS_ROOT` |
+| `__init__.py` | 暴露绝对路径常量：`CONFIG_PATH` / `DOCS_DIR` / `WIKI_DIR` / `CHROMA_DIR` / `CONVERSATIONS_DIR` / `SKILLS_ROOT` / `DOWNLOADS_DIR` |
 | `skill_loader.py` | 解析 `skills/*/SKILL.md`；`detect_skill(query)` 关键词匹配；`all_refs_dirs()` 返回所有 references 目录 |
 | `config.yaml` | 配置入口；分块/检索参数 + chat/cleaner/reranker/embedding 四段 API 配置 + source_weights |
 | `security.py` | Fernet 加密 API key（密钥落 `.secret_key`） |
@@ -45,6 +45,18 @@ F:/销售agent/
 | `mcp/mcp_manager.py` | `MCPManager` 单例：后台 asyncio 线程持久持有飞书 MCP 上下文，状态回调，同步桥接 |
 | `mcp/lark_bot.py` | `LarkBot` 单例：`lark-oapi` SDK 长连接接收飞书消息；`_query()` 入口调 `detect_skill()` 注入 skill 提示词，两条路径（MCP Agent / RAG QA 图）均感知 skill |
 | `mcp/lark_history.py` | 飞书机器人对话历史持久化：`load_history` / `append_turn` / `clear_history`；文件存 `agent_service/lark_conversations/` |
+| `mcp/builtin_tools.py` | 内置 LangChain `@tool` 单一实现源 + `BUILTIN_TOOLS` 列表（QA 图直接 bind）：`get_current_time` / `load_policy_file` / `generate_word_document`（生成 docx 落 `downloads/`，返回 `/download/<file>` 链接；正文经 `_render_body` 渲染，识别 Markdown 表格转为带边框 `Table Grid` 表、首行加粗，其余按段落；加粗/列表暂未解析仍为纯文本）+ `build_tool_table()`（工具清单注入提示词）。**注意**：此文件非 MCP，仅文件名归类在 mcp/ 下 |
+| `mcp/builtin_mcp_server.py` | 把内置工具暴露为 MCP（飞书路径）；新增工具若也要给飞书用才需在此加 `@mcp_server.tool()` 转发 |
+
+### `skills/`（领域知识 skill，纯提示注入，无执行能力）
+
+由 `skill_loader.py` 解析，`SKILL.md` = frontmatter(`name`/`description`/`triggers`) + body(L2 系统提示)；`references/*.md` 由 `load_policy_file` 工具按需读取。
+
+| 路径 | 职责 |
+|---|---|
+| `甬江人才政策/` | 宁波市甬江人才工程（2026）与甬才通系统操作，references 分文档 |
+| `太仓人才政策/` / `无锡人才政策/` / `成都人才政策/` | 各地人才政策顾问 |
+| `软著专利与技术文档/` | 指导生成软著登记、发明/实用新型专利申请文件、软件说明书、设计文档；body 内置四类文档的标准结构骨架；导出 Word 由内置工具 `generate_word_document` 落盘 |
 
 ### `api/`
 
@@ -55,9 +67,11 @@ F:/销售agent/
 | `app.py` | 兼容旧命令的 shim，直接 import `app_user.app` |
 | `auth.py` | **认证蓝图**（`/auth/*`）：`register` / `login` / `admin-login` / `logout` / `me`，MySQL users 表，Werkzeug 密码哈希 |
 | `users.py` | **用户管理蓝图**（`/users/*`，仅 admin）：列表 / 修改信息 / 删除 / 封禁 |
+| `conv_stats.py` | 对话统计 MySQL 模块：`conversation_stats` 表，`ensure_table()` / `get_compact_count` / `increment_compact_count`（自动压缩计数持久化） |
+| `session_store.py` | Redis Session 配置：`configure_session(app, key_prefix)`，服务端 session + 滑动空闲超时（`SESSION_IDLE_MINUTES`），用户/管理端各用前缀隔离 |
 | `services.py` | 单例（RAG / Reranker），settings 四段访问器 + `cfg_with_embedding(cfg)` + `get_wiki_dir()`（读 config.yaml storage.wiki_dir） |
 | `agent.py` | `POST /agent/chat`（SSE，QA 图驱动）+ `POST /feedback`（清洗子图） |
-| `knowledge.py` | `/files` CRUD、`POST /upload`、`POST /ingest`（SSE）、`POST /query`、`POST /vectordb/clear` |
+| `knowledge.py` | `/files` CRUD、`POST /upload`、`POST /ingest`（SSE）、`POST /query`、`POST /vectordb/clear`、`GET /download/<file>`（下载工具产物，防目录穿越） |
 | `settings.py` | `GET/POST /settings` + `POST /settings/test`（四模型连通测试） |
 | `conversations.py` | 会话 CRUD + `/conversations/<id>/compact` + `compact_conversation()`（含两级压缩）；**按用户子目录隔离**（`conversations/<user_id>/<uuid>.json`），所有路由校验归属，admin 可跨用户访问 |
 | `lark_agent.py` | 飞书蓝图：`GET /lark/status` + `POST /lark/chat` + SocketIO namespace `/lark` |
@@ -152,7 +166,7 @@ CREATE TABLE users (
 4. **存储留在 api 层**：清洗子图 / QA 图都是纯函数路径；chroma 写入、文件落盘只能在 `api/` 内做。
 5. **路径用绝对常量**：从不写 `Path("docs")`，永远 `DOCS_DIR / filename`，否则不同 CWD 启动会炸。
 6. **改 embedding model 必清向量库**：维度不匹配会让查询直接挂；在前端 settings 抽屉里这条警告必须保留。
-7. **不删 `rag/agent.py` 之外的 shim**：`rag/__init__.py` 仍被 `services.py` import；`graph/__init__.py` 暴露 `build_cleaning_graph` / `build_qa_graph` 是公共 API。
+7. **保留 import 边界 shim**：`rag/__init__.py` 仍被 `services.py` import（Agent 编排已迁至 `graph/qa`，`rag/agent.py` 已不存在）；`graph/__init__.py` 暴露 `build_cleaning_graph` / `build_qa_graph` 是公共 API。
 8. **前端 fetch 永远走相对路径**（`/conversations`、`/settings`），后端反代切走不会断。
 9. **两端 secret_key 不同**：`app_user.py` 用 `USER_SECRET_KEY`，`app_admin.py` 用 `ADMIN_SECRET_KEY`，session cookie 天然隔离，不要合并。
 10. **注册只能创建 user 角色**：`/auth/register` 硬编码 `role='user'`，admin 账号只能由数据库直接写入。

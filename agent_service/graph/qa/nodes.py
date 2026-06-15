@@ -11,7 +11,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.config import get_stream_writer
 
 from ..state import ChatState
-from .prompts import EXTRACT_SYSTEM, GENERATE_FALLBACK_SYSTEM, GENERATE_SYSTEM, TOOL_RESULTS_PREFIX
+from .prompts import EXTRACT_SYSTEM, build_generate_system
 
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
@@ -79,8 +79,16 @@ def call_tools_node(state: ChatState) -> ChatState:
 
     llm = _build_llm(state["chat_cfg"]).bind_tools(BUILTIN_TOOLS)
 
+    # 构造工具调用消息：如果有 skill 文档地图（系统提示），注入给 LLM
+    # 使模型能从文档地图中选择正确的 skill_name / filename 调用 load_policy_file
+    tool_msgs = []
+    skill_prompt = (state.get("skill_system_prompt") or "").strip()
+    if skill_prompt:
+        tool_msgs.append(SystemMessage(content=skill_prompt))
+    tool_msgs.append(HumanMessage(content=state["query"]))
+
     try:
-        response = llm.invoke([HumanMessage(content=state["query"])])
+        response = llm.invoke(tool_msgs)
     except Exception as exc:
         print(f"[call_tools] 工具检测异常: {exc}")
         return {"tool_results": None}
@@ -164,26 +172,18 @@ def generate_node(state: ChatState) -> ChatState:
     llm = _build_llm(state["chat_cfg"])
     hits = state.get("hits") or []
     threshold = state.get("score_threshold") or 0.3
-    skill_prompt = (state.get("skill_system_prompt") or "").strip()
-    tool_results = (state.get("tool_results") or "").strip()
+    has_hits = _hits_above_threshold(hits, threshold)
 
-    if _hits_above_threshold(hits, threshold):
-        ctx = _format_context(hits)
-        if skill_prompt:
-            system_prompt = (
-                skill_prompt
-                + "\n\n──── 检索片段 ────\n"
-                + ctx
-                + "\n──── 片段结束 ────"
-            )
-        else:
-            system_prompt = GENERATE_SYSTEM.format(context=ctx)
-    else:
-        system_prompt = skill_prompt or GENERATE_FALLBACK_SYSTEM
+    from agent_service.mcp.builtin_tools import build_tool_table
 
-    # 工具结果追加到系统提示末尾（不覆盖 RAG 上下文）
-    if tool_results:
-        system_prompt += TOOL_RESULTS_PREFIX + tool_results
+    system_prompt = build_generate_system(
+        skill_prompt=(state.get("skill_system_prompt") or "").strip(),
+        context=_format_context(hits) if has_hits else "",
+        tool_results=(state.get("tool_results") or "").strip(),
+        skill_table=(state.get("skill_table") or "").strip(),
+        has_hits=has_hits,
+        tool_table=build_tool_table(),
+    )
 
     msgs = [
         SystemMessage(content=system_prompt),

@@ -319,7 +319,7 @@ class LarkBot:
         """
         # lazy import 避免循环依赖（pitfall #13）
         from api import services
-        from agent_service.skill_loader import detect_skill
+        from agent_service.skill_loader import detect_skill, build_skill_table
 
         chat_cfg = services.load_chat_settings()
         if not chat_cfg.get("api_key"):
@@ -405,6 +405,7 @@ class LarkBot:
             "top_k": 5,
             "score_threshold": services.load_rag_threshold(),
             "skill_system_prompt": skill_prompt or None,
+            "skill_table": build_skill_table(),   # L1 常驻注入
         }
 
         full_text = ""

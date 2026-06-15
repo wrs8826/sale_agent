@@ -23,7 +23,7 @@ reranker:
 embedding:
   api_key: ""
   base_url: ""
-  model_name: "text-embedding-v4"
+  model_name: "BAAI/bge-large-zh-v1.5"  # 本地 sentence-transformers 模型名
 
 storage:
   wiki_dir: ""                   # 留空使用默认 agent_service/wiki/；不加密，普通字符串
@@ -33,7 +33,8 @@ storage:
 
 - cleaner 任一字段为空 → 取 chat 同名字段
 - reranker 任一字段为空 → 取 chat 的 `api_key` / `base_url`；`model_name` 默认 `gte-rerank-v2`
-- embedding 任一字段为空 → 取 chat 的 `api_key` / `base_url`；`model_name` 默认 `text-embedding-v4`
+- embedding 任一字段为空 → 取 chat 的 `api_key` / `base_url`；`model_name` 默认 `BAAI/bge-large-zh-v1.5`
+- 当前部署使用本地 sentence-transformers 模型（`api_provider: null`），不调用外部 embedding API；`embedding.api_key`/`base_url` 留空即可
 
 实现：`api/services.py:load_cleaner_settings()` / `load_reranker_settings()` / `load_embedding_settings()`。
 

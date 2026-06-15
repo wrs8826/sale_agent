@@ -217,6 +217,8 @@ if row.get("is_banned"):
     return jsonify({"error": "该账号已被封禁，请联系管理员"}), 403
 ```
 
+**进阶**：仅在登录时检查 `is_banned` 不能踢掉"封禁前已登录"的会话。`/auth/me` 现在每次都查库判断，封禁后清 session 并返回 403；`web/user.html` 全局 fetch 拦截器识别该 403 跳转 `/?banned=1`，并以 30s 间隔轮询 `/auth/me` 实现会话内自动登出（非实时，最多延迟 30s）。管理员端封禁操作前会弹确认框（解封无需确认），见 `web-admin/src/pages/UsersPage.tsx` 的 `banUser` 状态。
+
 ## 25. `POST /ingest` 不传 filename → 400 / SSE 立即 error
 
 **症状**：上传文件后调 `/ingest` 返回 400，或 SSE 里收到 `error` 事件，前端显示"上传失败"。

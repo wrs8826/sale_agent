@@ -6,9 +6,9 @@ from pathlib import Path
 
 import chromadb
 from chromadb.config import Settings as _ChromaSettings
-from flask import Blueprint, Response, jsonify, request, stream_with_context
+from flask import Blueprint, Response, jsonify, request, send_file, stream_with_context
 
-from agent_service import CONFIG_PATH, DOCS_DIR
+from agent_service import CONFIG_PATH, DOCS_DIR, DOWNLOADS_DIR
 from agent_service.graph import build_cleaning_graph
 from agent_service.rag import DocumentChunker, EmbedderFactory
 
@@ -73,6 +73,19 @@ def delete_file(filename):
     target.unlink()
     services.invalidate_rag()
     return jsonify({"ok": True})
+
+
+# ── 工具产物下载 ──────────────────────────────────────────────────────────────
+@bp.route("/download/<path:filename>", methods=["GET"])
+def download(filename):
+    """下载 generate_word_document 等工具生成在 DOWNLOADS_DIR 的产物。"""
+    name = Path(filename).name  # 仅取文件名，防目录穿越
+    if not name or name != filename:
+        return jsonify({"error": "非法文件名"}), 400
+    target = DOWNLOADS_DIR / name
+    if not target.is_file():
+        return jsonify({"error": "文件不存在或已过期"}), 404
+    return send_file(str(target), as_attachment=True, download_name=name)
 
 
 # ── RAG 检索测试 ──────────────────────────────────────────────────────────────

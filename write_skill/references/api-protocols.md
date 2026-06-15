@@ -151,8 +151,10 @@
 role ≠ admin 时即使密码正确也返回 403。
 
 ### `GET /auth/me`
-响应：`{ user_id, username, role }` / `401`
+响应：`{ user_id, username, role }` / `401` / `403`
 - `user_id` 为 MySQL `users.id`（int），前端用于判断会话归属
+- 每次请求都会查库检查 `is_banned`：若账号已被封禁，清除 session 并返回 `403 { "error": "该账号已被封禁，请联系管理员" }`
+- `web/user.html` 每 30s 轮询本接口，收到该 403 后跳转 `/?banned=1`，登录页据此显示封禁提示
 
 ### `POST /agent/chat`
 ```json
@@ -243,7 +245,7 @@ form-data: file=<.txt|.md|.rst|.html>
 ```
 按 `updated_at` 倒序
 - **普通用户**：只返回自己的（扫 `conversations/<user_id>/`）
-- **admin**：返回全部用户会话（扫所有子目录）+ 根目录遗留文件
+- **admin**：仅在管理端（`app_admin.py`，`app.config["IS_ADMIN_APP"] = True`）登录时返回全部用户会话（扫所有子目录）+ 根目录遗留文件；admin 账号登录用户端（`app_user.py`）时按普通用户逻辑，只能看到自己的会话
 
 ### `GET /conversations/<id>`
 完整会话 JSON（详见 `conversation-storage.md`）

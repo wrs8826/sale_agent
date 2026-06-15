@@ -17,6 +17,7 @@ CONVERSATIONS_DIR = PACKAGE_ROOT / "conversations"
 LARK_CONVERSATIONS_DIR = PACKAGE_ROOT / "lark_conversations"
 LARK_TOKENS_DIR = PACKAGE_ROOT / "lark_tokens"
 SKILLS_ROOT = PROJECT_ROOT / "skills"
+DOWNLOADS_DIR = PACKAGE_ROOT / "downloads"  # 工具生成的可下载产物（docx 等）
 
 __all__ = [
     "PACKAGE_ROOT",
@@ -29,4 +30,5 @@ __all__ = [
     "LARK_CONVERSATIONS_DIR",
     "LARK_TOKENS_DIR",
     "SKILLS_ROOT",
+    "DOWNLOADS_DIR",
 ]

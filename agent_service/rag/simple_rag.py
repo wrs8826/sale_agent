@@ -1,6 +1,7 @@
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, Union
@@ -633,9 +634,15 @@ class HybridRetriever:
         vector_k = self.config.vector_k if vector_k is None else vector_k
         bm25_weight = self.config.bm25_weight if bm25_weight is None else bm25_weight
 
-        bm25_hits = self.bm25_retriever.retrieve(query, top_k=bm25_k)
-        query_embedding = self.embedder.embed_query(query)
-        vector_hits = self.vector_store.query(query_embedding, top_k=vector_k)
+        def _vector_search():
+            query_embedding = self.embedder.embed_query(query)
+            return self.vector_store.query(query_embedding, top_k=vector_k)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            bm25_future = executor.submit(self.bm25_retriever.retrieve, query, top_k=bm25_k)
+            vector_future = executor.submit(_vector_search)
+            bm25_hits = bm25_future.result()
+            vector_hits = vector_future.result()
 
         combined_scores: Dict[int, Dict] = {}
         for hit in bm25_hits:

@@ -8,7 +8,7 @@ from datetime import datetime
 from flask import Blueprint, Response, jsonify, request, session, stream_with_context
 
 from agent_service.graph import build_cleaning_graph, build_qa_graph
-from agent_service.skill_loader import detect_skill
+from agent_service.skill_loader import detect_skill, build_skill_table
 
 from . import conversations as conv_store
 from . import services
@@ -184,6 +184,7 @@ def agent_chat():
         "top_k": top_k,
         "score_threshold": services.load_rag_threshold(),
         "skill_system_prompt": skill.system_prompt if skill else None,
+        "skill_table": build_skill_table(),   # L1 常驻注入
     }
 
     def generate():

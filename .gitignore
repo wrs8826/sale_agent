@@ -17,6 +17,9 @@ agent_service/chroma_persist/
 agent_service/conversations/
 agent_service/lark_conversations/
 
+# Tool-generated downloadable artifacts (docx etc.)
+agent_service/downloads/
+
 # Knowledge base docs (may contain proprietary content)
 agent_service/docs/
 agent_service/wiki/
@@ -24,6 +27,15 @@ agent_service/wiki/
 # Config files with secrets (use *.example templates instead)
 agent_service/config.yaml
 agent_service/mcp/lark_mcp.json
+
+# Lark OAuth token cache (contains live access/refresh tokens)
+agent_service/lark_tokens/
+
+# Debug / runtime logs
+*.log
+
+# Node / frontend dependencies (web-admin)
+web-admin/node_modules/
 
 # Editor / OS
 .vscode/

@@ -247,6 +247,41 @@
       display: flex; flex-direction: column; overflow: hidden;
       background: #fff;
     }
+
+    /* 并行对话标签栏 */
+    .chat-tabs {
+      display: flex; align-items: center; gap: 2px;
+      padding: 6px 8px 0; flex-shrink: 0;
+      overflow-x: auto; background: #fff; border-bottom: 1px solid #f3f4f6;
+    }
+    .chat-tabs::-webkit-scrollbar { height: 0; }
+    .chat-tab {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 10px; margin-bottom: 4px; font-size: 12px; color: #6b6b6b;
+      border-bottom: 2px solid transparent; border-radius: 6px 6px 0 0;
+      cursor: pointer; max-width: 160px; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis; flex-shrink: 0;
+      transition: background .12s;
+    }
+    .chat-tab:hover { background: #f5f5f5; }
+    .chat-tab.active { color: #1d4ed8; background: #eff6ff; border-bottom-color: #3b82f6; font-weight: 600; }
+    .chat-tab .tab-dot {
+      width: 6px; height: 6px; border-radius: 50%; background: #3b82f6;
+      flex-shrink: 0; animation: tab-pulse 1.2s infinite;
+    }
+    .chat-tab .tab-label { overflow: hidden; text-overflow: ellipsis; }
+    .chat-tab .tab-close {
+      color: #9ca3af; flex-shrink: 0; font-size: 11px; line-height: 1;
+      padding: 1px;
+    }
+    .chat-tab .tab-close:hover { color: #dc2626; }
+    .chat-tab-new {
+      display: flex; align-items: center; justify-content: center;
+      width: 24px; height: 24px; flex-shrink: 0; margin-bottom: 4px;
+      border-radius: 6px; cursor: pointer; color: #9ca3af; font-size: 14px;
+    }
+    .chat-tab-new:hover { background: #f0f5ff; color: #3b82f6; }
+    @keyframes tab-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
     .chat-header {
       padding: 12px 20px 10px;
       border-bottom: 1px solid #f3f4f6;
@@ -284,9 +319,13 @@
     }
     .msg-avatar.agent { background: #eff6ff; color: #3b82f6; }
     .msg-avatar.user  { background: #111827; color: #fff; }
+    .msg-content { display: flex; flex-direction: column; max-width: 76%; min-width: 0; }
+    .msg-row.user .msg-content { align-items: flex-end; }
+    .msg-row.agent .msg-content { align-items: flex-start; }
     .msg-bubble {
-      max-width: 76%; padding: 11px 15px;
+      max-width: 100%; padding: 11px 15px;
       border-radius: 14px; line-height: 1.7; font-size: 14px;
+      word-break: break-word; overflow-wrap: anywhere;
     }
     .msg-row.agent .msg-bubble {
       background: #f3f4f6; color: #111827; border-top-left-radius: 4px;
@@ -336,6 +375,20 @@
     .msg-bubble blockquote {
       border-left: 3px solid #d1d5db; padding-left: 12px; color: #6b7280; margin: 6px 0;
     }
+    .msg-bubble h1, .msg-bubble h2, .msg-bubble h3,
+    .msg-bubble h4, .msg-bubble h5, .msg-bubble h6 {
+      font-weight: 700; margin: 12px 0 6px;
+    }
+    .msg-bubble h1 { font-size: 18px; }
+    .msg-bubble h2 { font-size: 16px; }
+    .msg-bubble h3 { font-size: 15px; }
+    .msg-bubble h4, .msg-bubble h5, .msg-bubble h6 { font-size: 14px; }
+    .msg-bubble a { color: #3b82f6; text-decoration: underline; }
+    .msg-bubble hr { border: none; border-top: 1px solid #e5e7eb; margin: 10px 0; }
+    .msg-bubble .table-wrap { overflow-x: auto; margin: 8px 0; }
+    .msg-bubble table { border-collapse: collapse; min-width: 100%; white-space: nowrap; font-size: 13px; }
+    .msg-bubble th, .msg-bubble td { border: 1px solid #e5e7eb; padding: 6px 10px; text-align: left; }
+    .msg-bubble th { background: #f7f7f8; font-weight: 600; }
 
     /* 反馈区 */
     .feedback-bar {
@@ -402,6 +455,8 @@
     .send-btn:hover   { background: #2563eb; }
     .send-btn:active  { transform: scale(.93); }
     .send-btn:disabled{ background: #93c5fd; cursor: not-allowed; }
+    .send-btn.stopping { background: #ef4444; cursor: pointer; }
+    .send-btn.stopping:hover { background: #dc2626; }
 
     /* ══ 设置页 ══════════════════════════════════════════════════════ */
     .settings-body { flex: 1; overflow-y: auto; padding: 24px; }
@@ -511,6 +566,7 @@
     ::-webkit-scrollbar-thumb { background: #e5e7eb; border-radius: 99px; }
     ::-webkit-scrollbar-thumb:hover { background: #d1d5db; }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
 </head>
 <body>
 
@@ -613,6 +669,7 @@
 
     <!-- 主对话区 -->
     <div class="chat-main">
+      <div class="chat-tabs" id="chat-tabs"></div>
       <div class="chat-header">
         <div class="chat-header-title" id="chat-title">智能问答</div>
         <div class="chat-header-sub" id="chat-sub">基于知识库回答业务问题</div>
@@ -652,7 +709,8 @@
         <div class="chat-input-box">
           <textarea id="chat-input" rows="1" placeholder="输入您的问题，Enter 发送（Shift+Enter 换行）"></textarea>
           <button class="send-btn" id="send-btn" disabled>
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            <svg class="icon-send" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            <svg class="icon-stop" width="13" height="13" viewBox="0 0 24 24" fill="currentColor" style="display:none"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
           </button>
         </div>
       </div>
@@ -834,19 +892,13 @@ function esc(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+marked.use({ gfm: true, breaks: true });
 function renderMd(raw) {
-  let t = raw
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/```[\w]*\n?([\s\S]*?)```/g, (_,c) => `<pre><code>${c.trim()}</code></pre>`)
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
-    .replace(/^#{1,3}\s+(.+)$/gm, '<strong>$1</strong>')
-    .replace(/^[-*]\s+(.+)$/gm, '<li>$1</li>')
-    .replace(/(<li>.*<\/li>\n?)+/g, s => `<ul>${s}</ul>`)
-    .replace(/\n\n+/g, '</p><p>')
-    .replace(/\n/g, '<br>');
-  return `<p>${t}</p>`;
+  if (!raw) return '';
+  // 后处理替换：不依赖 renderer API（marked v9 的 table renderer 签名已改为 token 对象，旧写法失效）
+  return marked.parse(raw)
+    .replace(/<table>/g, '<div class="table-wrap"><table>')
+    .replace(/<\/table>/g, '</table></div>');
 }
 
 /* ── 页面切换 ──────────────────────────────────────────────────── */
@@ -1004,7 +1056,7 @@ btnUpload.addEventListener('click', async () => {
 });
 
 /* ══════════════════════════════════════════════════════════════
-   对话页 — 会话管理
+   对话页 — 会话管理（支持多对话并行）
 ══════════════════════════════════════════════════════════════ */
 const chatBody    = document.getElementById('chat-body');
 const chatWelcome = document.getElementById('chat-welcome');
@@ -1012,35 +1064,53 @@ const chatInput   = document.getElementById('chat-input');
 const sendBtn     = document.getElementById('send-btn');
 const feedbackBar = document.getElementById('feedback-bar');
 const convList    = document.getElementById('conv-list');
+const chatTabsEl  = document.getElementById('chat-tabs');
 
-let convId    = null;   // 当前会话 ID
-let chatHist  = [];     // [{role,content}] 用于 feedback
-let rating    = 0;
-let streaming = false;
+function genId() { return Math.random().toString(36).slice(2); }
 
-// ── 按会话 ID 隔离的压缩计数器 ────────────────────────────────────────────
-// key = convId（字符串），value = 该会话的累计自动压缩次数（从数据库恢复）
-// 用字典而非单一全局变量，彻底避免多会话之间共享/污染
-const _compactCounts = {};
+// ── 多对话并行：每个 tab 维护独立的消息流、输入框内容、流式状态 ───────────
+// tabs[tabId] = { tabId, convId, title, sub, messages, rating, comment,
+//                  compactCount, streaming, input, abortFn }
+let tabs = {};
+let tabOrder = [];
+let activeTabId = null;
 
-function _getCount()    { return convId ? (_compactCounts[convId] || 0) : 0; }
-function _setCount(n)   { if (convId) _compactCounts[convId] = n; }
-function _incCount()    { if (convId) _compactCounts[convId] = _getCount() + 1; }
+function createTab(opts = {}) {
+  const t = {
+    tabId: genId(),
+    convId: opts.convId || null,
+    title: opts.title || '智能问答',
+    sub: opts.sub || '基于知识库回答业务问题',
+    messages: opts.messages || [],  // [{id, role, content, streaming}]
+    rating: 0,
+    comment: '',
+    compactCount: opts.compactCount || 0,
+    streaming: false,
+    thinking: false,
+    input: '',
+    abortFn: null,
+  };
+  tabs[t.tabId] = t;
+  tabOrder.push(t.tabId);
+  return t;
+}
+
+function _getCount(tabId)    { return tabs[tabId] ? (tabs[tabId].compactCount || 0) : 0; }
+function _setCount(tabId, n) { if (tabs[tabId]) tabs[tabId].compactCount = n; }
+function _incCount(tabId)    { _setCount(tabId, _getCount(tabId) + 1); }
 
 /* 在消息区底部显示/更新"建议新开对话"提示。
-   若 tip 已存在则只更新次数文字，不重复插入。
-   计数从数据库恢复，页面刷新后仍正确（DB 为权威值）。 */
-function _showCompactTip() {
-  const count = _getCount();
+   若 tip 已存在则只更新次数文字，不重复插入。 */
+function _showCompactTipFor(t) {
+  const count = t.compactCount || 0;
   const label =
     '该对话已自动压缩 <b>' + count + ' 次</b>，长上下文可能影响回答质量。' +
-    '建议<button onclick="startNewConversation()" style="background:none;border:none;' +
+    '建议<button onclick="newConversation()" style="background:none;border:none;' +
     'color:#d97706;font-weight:600;cursor:pointer;padding:0 2px;font-size:13px;' +
     'text-decoration:underline">新开一个对话</button>以获得更好效果。';
 
   let tip = document.getElementById('compact-tip');
   if (tip) {
-    // tip 已存在：只刷新次数文字，无需重新插入
     tip.querySelector('span').innerHTML = label;
     return;
   }
@@ -1063,8 +1133,109 @@ function _showCompactTip() {
   chatBody.scrollTop = chatBody.scrollHeight;
 }
 
+/* 渲染标签栏：每个并行对话一个标签，streaming 中显示蓝色脉冲点 */
+function renderTabBar() {
+  let html = '';
+  for (const id of tabOrder) {
+    const t = tabs[id];
+    if (!t) continue;
+    const active = id === activeTabId ? ' active' : '';
+    html += `<div class="chat-tab${active}" onclick="switchTab('${id}')">`;
+    if (t.streaming) html += '<span class="tab-dot"></span>';
+    html += `<span class="tab-label">${esc(t.title)}</span>`;
+    if (tabOrder.length > 1) {
+      html += `<span class="tab-close" onclick="event.stopPropagation();closeTab('${id}')">✕</span>`;
+    }
+    html += '</div>';
+  }
+  html += '<div class="chat-tab-new" title="新建并行对话" onclick="newConversation()">＋</div>';
+  chatTabsEl.innerHTML = html;
+}
+
+/* 将指定 tab 的状态完整渲染到共享 DOM（消息区/标题/输入框/反馈栏/侧栏激活态） */
+function renderTab(tabId) {
+  const t = tabs[tabId];
+  if (!t) return;
+
+  [...chatBody.children].forEach(c => { if (c !== chatWelcome) c.remove(); });
+
+  if (t.messages.length === 0) {
+    chatWelcome.style.display = '';
+  } else {
+    chatWelcome.style.display = 'none';
+    for (const m of t.messages) {
+      const row = appendMsg(m.role === 'user' ? 'user' : 'agent',
+        renderMd(m.content || (m.streaming ? '…' : '')), { fromHistory: true });
+      row.dataset.msgId = m.id;
+    }
+  }
+
+  if (t.thinking) appendThinking();
+
+  if (t.compactCount >= 2) _showCompactTipFor(t);
+
+  feedbackBar.style.display = t.messages.length > 0 ? '' : 'none';
+  document.getElementById('feedback-content').classList.remove('open');
+  document.getElementById('feedback-toggle').querySelector('svg').style.transform = '';
+  document.querySelectorAll('.star').forEach(x => x.classList.toggle('filled', parseInt(x.dataset.v) <= t.rating));
+  document.getElementById('feedback-text').value = t.comment;
+
+  document.getElementById('chat-title').textContent = t.title;
+  document.getElementById('chat-sub').textContent = t.sub;
+
+  chatInput.value = t.input;
+  chatInput.style.height = 'auto';
+  chatInput.style.height = Math.min(chatInput.scrollHeight, 160) + 'px';
+  sendBtn.disabled = !t.streaming && !t.input.trim();
+  sendBtn.classList.toggle('stopping', t.streaming);
+  sendBtn.querySelector('.icon-send').style.display = t.streaming ? 'none' : '';
+  sendBtn.querySelector('.icon-stop').style.display = t.streaming ? '' : 'none';
+  sendBtn.title = t.streaming ? '停止生成' : '发送';
+
+  document.querySelectorAll('.conv-item').forEach(el => {
+    el.classList.toggle('active', !!t.convId && el.dataset.id === t.convId);
+  });
+
+  chatBody.scrollTop = chatBody.scrollHeight;
+}
+
+function switchTab(tabId) {
+  if (tabId === activeTabId || !tabs[tabId]) return;
+  activeTabId = tabId;
+  renderTab(tabId);
+  renderTabBar();
+}
+
+/* 关闭一个并行对话标签（中断其流式请求） */
+function closeTab(tabId) {
+  tabs[tabId]?.abortFn?.();
+  delete tabs[tabId];
+  tabOrder = tabOrder.filter(id => id !== tabId);
+  if (tabOrder.length === 0) {
+    const t = createTab();
+    activeTabId = t.tabId;
+  } else if (activeTabId === tabId) {
+    activeTabId = tabOrder[tabOrder.length - 1];
+  }
+  renderTab(activeTabId);
+  renderTabBar();
+}
+
+/* 新建并行对话标签 */
+function newConversation() {
+  const t = createTab();
+  activeTabId = t.tabId;
+  renderTab(t.tabId);
+  renderTabBar();
+}
+
+document.getElementById('btn-new-conv').addEventListener('click', () => {
+  newConversation();
+  toast('已开始新对话');
+});
+
 /* 加载会话列表 */
-async function loadConvList({ keepActive } = {}) {
+async function loadConvList() {
   try {
     const r = await fetch('/conversations');
     if (!r.ok) return;
@@ -1089,13 +1260,14 @@ async function loadConvList({ keepActive } = {}) {
       else                     groups.earlier.push(item);
     }
 
+    const activeConvId = tabs[activeTabId]?.convId;
     const labels = { today: '今天', yesterday: '昨天', week: '最近 7 天', earlier: '更早' };
     let html = '';
     for (const [key, label] of Object.entries(labels)) {
       if (!groups[key].length) continue;
       html += `<div class="conv-group-label">${label}</div>`;
       for (const item of groups[key]) {
-        const active = item.id === convId ? ' active' : '';
+        const active = item.id === activeConvId ? ' active' : '';
         html += `
           <div class="conv-item${active}" data-id="${item.id}" onclick="switchConversation('${item.id}')">
             <div class="conv-item-info">
@@ -1119,74 +1291,28 @@ async function loadConvList({ keepActive } = {}) {
   } catch { /* 静默失败 */ }
 }
 
-/* 创建新会话（前端重置，不调接口；接口在第一次发送时由后端创建） */
-function startNewConversation() {
-  convId = null;   // 置空后 _setCount / _getCount 自动忽略操作
-  chatHist = [];
-  rating = 0;
-  // 清空消息区
-  [...chatBody.children].forEach(c => { if (c !== chatWelcome) c.remove(); });
-  chatWelcome.style.display = '';
-  feedbackBar.style.display = 'none';
-  closeFeedback();
-  // 更新侧栏激活状态
-  document.querySelectorAll('.conv-item').forEach(el => el.classList.remove('active'));
-  document.getElementById('chat-title').textContent = '智能问答';
-  document.getElementById('chat-sub').textContent = '基于知识库回答业务问题';
-}
-
-document.getElementById('btn-new-conv').addEventListener('click', () => {
-  startNewConversation();
-  toast('已开始新对话');
-});
-
-/* 切换会话 */
+/* 打开一个会话：若已在某个标签中打开则直接切换，否则新建标签加载 */
 async function switchConversation(id) {
-  if (id === convId) return;
+  const existing = Object.values(tabs).find(t => t.convId === id);
+  if (existing) { switchTab(existing.tabId); return; }
+
   try {
     const r = await fetch(`/conversations/${id}`);
     if (!r.ok) { toast('加载会话失败', 'error'); return; }
     const conv = await r.json();
 
-    convId = id;
-    chatHist = [];
-    rating = 0;
-
-    // 清空消息区
-    [...chatBody.children].forEach(c => { if (c !== chatWelcome) c.remove(); });
-    feedbackBar.style.display = 'none';
-    closeFeedback();
-
-    // 从数据库恢复该会话的历史压缩次数（convId 已设置，写入对应 key）
-    _setCount(conv.auto_compact_count || 0);
-
-    // 渲染历史消息（全部，包括已压缩部分）
-    const msgs = conv.messages || [];
-    if (msgs.length === 0) {
-      chatWelcome.style.display = '';
-    } else {
-      chatWelcome.style.display = 'none';
-      for (const m of msgs) {
-        appendMsg(m.role === 'user' ? 'user' : 'agent', renderMd(m.content), { fromHistory: true });
-        chatHist.push({ role: m.role, content: m.content });
-      }
-      if (msgs.length > 0) feedbackBar.style.display = '';
-    }
-
-    // 若历史记录中压缩次数已达阈值，立即展示提示
-    if (_getCount() >= 2) _showCompactTip();
-
-    // 更新侧栏激活状态
-    document.querySelectorAll('.conv-item').forEach(el => {
-      el.classList.toggle('active', el.dataset.id === id);
+    const msgs = (conv.messages || []).map(m => ({ id: genId(), role: m.role, content: m.content }));
+    const t = createTab({
+      convId: id,
+      title: conv.title || '对话',
+      sub: `共 ${msgs.length} 条消息${conv.has_summary ? ' · 含历史摘要' : ''}`,
+      messages: msgs,
+      compactCount: conv.auto_compact_count || 0,
     });
-
-    // 更新顶部标题
-    document.getElementById('chat-title').textContent = conv.title || '对话';
-    document.getElementById('chat-sub').textContent =
-      `共 ${msgs.length} 条消息${conv.has_summary ? ' · 含历史摘要' : ''}`;
-
-    chatBody.scrollTop = chatBody.scrollHeight;
+    activeTabId = t.tabId;
+    renderTab(t.tabId);
+    renderTabBar();
+    loadConvList();
   } catch (e) {
     toast('加载会话失败：' + e.message, 'error');
   }
@@ -1198,7 +1324,8 @@ async function deleteConversation(id) {
   try {
     const r = await fetch(`/conversations/${id}`, { method: 'DELETE' });
     if (!r.ok) { toast('删除失败', 'error'); return; }
-    if (id === convId) startNewConversation();
+    const openTab = Object.values(tabs).find(t => t.convId === id);
+    if (openTab) closeTab(openTab.tabId);
     loadConvList();
     toast('对话已删除');
   } catch { toast('删除失败', 'error'); }
@@ -1228,7 +1355,13 @@ function startRename(id, btn) {
       });
       if (r.ok) {
         titleEl.textContent = newTitle;
-        if (id === convId) document.getElementById('chat-title').textContent = newTitle;
+        for (const t of Object.values(tabs)) {
+          if (t.convId === id) {
+            t.title = newTitle;
+            if (t.tabId === activeTabId) document.getElementById('chat-title').textContent = newTitle;
+          }
+        }
+        renderTabBar();
       } else { toast('重命名失败', 'error'); }
     } catch { toast('重命名失败', 'error'); }
   }
@@ -1267,7 +1400,7 @@ function appendMsg(role, html, { fromHistory } = {}) {
   row.className = `msg-row ${role}`;
   row.innerHTML = `
     <div class="msg-avatar ${role === 'user' ? 'user' : 'agent'}">${init}</div>
-    <div>
+    <div class="msg-content">
       <div class="msg-bubble">${html}</div>
       <div class="msg-meta">
         <span class="msg-time">${fmtTime()}</span>
@@ -1296,29 +1429,62 @@ function appendThinking() {
 chatInput.addEventListener('input', () => {
   chatInput.style.height = 'auto';
   chatInput.style.height = Math.min(chatInput.scrollHeight, 160) + 'px';
-  sendBtn.disabled = !chatInput.value.trim() || streaming;
+  const t = tabs[activeTabId];
+  if (t) t.input = chatInput.value;
+  sendBtn.disabled = t ? (t.streaming ? false : !chatInput.value.trim()) : !chatInput.value.trim();
 });
 chatInput.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!sendBtn.disabled) doSend(); }
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    const t = tabs[activeTabId];
+    if (t && t.streaming) return;
+    if (!sendBtn.disabled) doSend();
+  }
 });
-sendBtn.addEventListener('click', doSend);
+sendBtn.addEventListener('click', () => {
+  const t = tabs[activeTabId];
+  if (t && t.streaming) { t.abortFn?.(); return; }
+  doSend();
+});
 
+/* 发送消息：绑定到调用时的 activeTabId，后台流式更新该 tab，与当前激活标签无关 */
 async function doSend() {
+  const tabId = activeTabId;
+  const t = tabs[tabId];
+  if (!t) return;
   const msg = chatInput.value.trim();
-  if (!msg || streaming) return;
+  if (!msg || t.streaming) return;
 
-  chatWelcome.style.display = 'none';
-  chatInput.value = '';
-  chatInput.style.height = 'auto';
-  sendBtn.disabled = true;
-  streaming = true;
+  t.input = '';
+  t.streaming = true;
+  t.thinking = true;
+  if (tabId === activeTabId) {
+    chatInput.value = '';
+    chatInput.style.height = 'auto';
+    // 流式期间按钮切到「停止」态且保持可点，使用户可中断
+    sendBtn.disabled = false;
+    sendBtn.classList.add('stopping');
+    sendBtn.querySelector('.icon-send').style.display = 'none';
+    sendBtn.querySelector('.icon-stop').style.display = '';
+    sendBtn.title = '停止生成';
+  }
 
-  appendMsg('user', renderMd(msg));
-  chatHist.push({ role: 'user', content: msg });
-  appendThinking();
+  const userMsgId = genId();
+  t.messages.push({ id: userMsgId, role: 'user', content: msg });
+  if (tabId === activeTabId) {
+    chatWelcome.style.display = 'none';
+    const row = appendMsg('user', renderMd(msg));
+    row.dataset.msgId = userMsgId;
+    appendThinking();
+  }
+  renderTabBar();
 
-  let agentBubble = null;
-  let agentText   = '';
+  const assistantId = genId();
+  let agentText = '';
+  let started = false;
+  let aborted = false;
+  const controller = new AbortController();
+  t.abortFn = () => { aborted = true; controller.abort(); };
 
   try {
     const res = await fetch('/agent/chat', {
@@ -1326,15 +1492,21 @@ async function doSend() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         message: msg,
-        conversation_id: convId || undefined,
+        conversation_id: t.convId || undefined,
         top_k: 5,
       }),
+      signal: controller.signal,
     });
 
     if (!res.ok) {
-      document.getElementById('thinking-row')?.remove();
       const err = await res.json().catch(() => ({}));
-      appendMsg('agent', `<span style="color:#dc2626">${esc(err.error || 'HTTP ' + res.status)}</span>`);
+      const errMsg = err.error || ('HTTP ' + res.status);
+      t.messages.push({ id: assistantId, role: 'assistant', content: `❌ ${errMsg}` });
+      t.thinking = false;
+      if (tabId === activeTabId) {
+        document.getElementById('thinking-row')?.remove();
+        appendMsg('agent', `<span style="color:#dc2626">${esc(errMsg)}</span>`).dataset.msgId = assistantId;
+      }
       return;
     }
 
@@ -1344,7 +1516,7 @@ async function doSend() {
 
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done || aborted) break;
       buf += dec.decode(value, { stream: true });
       const parts = buf.split('\n\n');
       buf = parts.pop();
@@ -1356,53 +1528,109 @@ async function doSend() {
 
         if (ev.type === 'token') {
           agentText += ev.text || '';
-          if (!agentBubble) {
-            document.getElementById('thinking-row')?.remove();
-            const row = appendMsg('agent', '');
-            agentBubble = row.querySelector('.msg-bubble');
+          if (!started) {
+            started = true;
+            t.messages.push({ id: assistantId, role: 'assistant', content: agentText, streaming: true });
+          } else {
+            const m = t.messages.find(x => x.id === assistantId);
+            if (m) m.content = agentText;
           }
-          agentBubble.innerHTML = renderMd(agentText);
-          chatBody.scrollTop = chatBody.scrollHeight;
+          t.thinking = false;
+          if (tabId === activeTabId) {
+            chatWelcome.style.display = 'none';
+            document.getElementById('thinking-row')?.remove();
+            let row = chatBody.querySelector(`[data-msg-id="${assistantId}"]`);
+            if (!row) {
+              row = appendMsg('agent', '');
+              row.dataset.msgId = assistantId;
+            }
+            row.querySelector('.msg-bubble').innerHTML = renderMd(agentText);
+            chatBody.scrollTop = chatBody.scrollHeight;
+          }
         } else if (ev.type === 'done') {
           if (ev.full_text) agentText = ev.full_text;
-          if (!agentBubble) {
-            document.getElementById('thinking-row')?.remove();
-            const row = appendMsg('agent', renderMd(agentText || '（无回答）'));
-            agentBubble = row.querySelector('.msg-bubble');
+          if (!started) {
+            t.messages.push({ id: assistantId, role: 'assistant', content: agentText });
           } else {
-            agentBubble.innerHTML = renderMd(agentText);
+            const m = t.messages.find(x => x.id === assistantId);
+            if (m) { m.content = agentText; m.streaming = false; }
           }
-          chatHist.push({ role: 'assistant', content: agentText });
-          feedbackBar.style.display = '';
+          t.thinking = false;
+          if (tabId === activeTabId) {
+            document.getElementById('thinking-row')?.remove();
+            let row = chatBody.querySelector(`[data-msg-id="${assistantId}"]`);
+            if (!row) {
+              row = appendMsg('agent', '');
+              row.dataset.msgId = assistantId;
+            }
+            row.querySelector('.msg-bubble').innerHTML = renderMd(agentText || '（无回答）');
+            feedbackBar.style.display = '';
+          }
         } else if (ev.type === 'auto_compacted') {
           // 优先使用服务端返回的累计次数（数据库权威值），降级到本地自增
           if (ev.total_compact_count > 0) {
-            _setCount(ev.total_compact_count);
+            _setCount(tabId, ev.total_compact_count);
           } else {
-            _incCount();
+            _incCount(tabId);
           }
-          if (_getCount() >= 2) _showCompactTip();
+          if (_getCount(tabId) >= 2 && tabId === activeTabId) _showCompactTipFor(t);
         } else if (ev.type === 'conversation_saved') {
-          const isNew = !convId;
-          convId = ev.conversation_id;
-          document.getElementById('chat-title').textContent = ev.title || '对话';
-          // 刷新侧栏（新对话时插入条目，已有时更新时间）
+          t.convId = ev.conversation_id;
+          if (ev.title) t.title = ev.title;
+          if (tabId === activeTabId) document.getElementById('chat-title').textContent = t.title;
+          renderTabBar();
           loadConvList();
-          if (isNew) {
-            // 侧栏激活等刷新后由 loadConvList 处理（convId 已设置）
-          }
         } else if (ev.type === 'error') {
-          document.getElementById('thinking-row')?.remove();
-          if (!agentBubble) appendMsg('agent', `<span style="color:#dc2626">${esc(ev.message)}</span>`);
+          if (!started) {
+            t.messages.push({ id: assistantId, role: 'assistant', content: `❌ ${ev.message}` });
+          } else {
+            const m = t.messages.find(x => x.id === assistantId);
+            if (m) { m.content = `❌ ${ev.message}`; m.streaming = false; }
+          }
+          t.thinking = false;
+          if (tabId === activeTabId) {
+            document.getElementById('thinking-row')?.remove();
+            let row = chatBody.querySelector(`[data-msg-id="${assistantId}"]`);
+            if (!row) { row = appendMsg('agent', ''); row.dataset.msgId = assistantId; }
+            row.querySelector('.msg-bubble').innerHTML = `<span style="color:#dc2626">${esc(ev.message)}</span>`;
+          }
         }
       }
     }
   } catch (e) {
-    document.getElementById('thinking-row')?.remove();
-    appendMsg('agent', `<span style="color:#dc2626">网络错误：${esc(e.message)}</span>`);
+    if (!aborted) {
+      const m = t.messages.find(x => x.id === assistantId);
+      if (m) { m.content = `❌ 网络错误：${e.message}`; m.streaming = false; }
+      else t.messages.push({ id: assistantId, role: 'assistant', content: `❌ 网络错误：${e.message}` });
+      t.thinking = false;
+      if (tabId === activeTabId) {
+        document.getElementById('thinking-row')?.remove();
+        let row = chatBody.querySelector(`[data-msg-id="${assistantId}"]`);
+        if (!row) { row = appendMsg('agent', ''); row.dataset.msgId = assistantId; }
+        row.querySelector('.msg-bubble').innerHTML = `<span style="color:#dc2626">网络错误：${esc(e.message)}</span>`;
+      }
+    }
   } finally {
-    streaming = false;
-    sendBtn.disabled = !chatInput.value.trim();
+    t.streaming = false;
+    t.thinking = false;
+    t.abortFn = null;
+    const m = t.messages.find(x => x.id === assistantId);
+    if (m) {
+      m.streaming = false;
+      if (aborted && m.content) m.content += '\n\n*[已停止]*';
+    }
+    if (tabId === activeTabId) {
+      document.getElementById('thinking-row')?.remove();
+      if (aborted && m) {
+        const row = chatBody.querySelector(`[data-msg-id="${assistantId}"]`);
+        if (row) row.querySelector('.msg-bubble').innerHTML = renderMd(m.content);
+      }
+      sendBtn.disabled = !chatInput.value.trim();
+      sendBtn.classList.remove('stopping');
+      sendBtn.querySelector('.icon-send').style.display = '';
+      sendBtn.querySelector('.icon-stop').style.display = 'none';
+    }
+    renderTabBar();
   }
 }
 
@@ -1411,7 +1639,8 @@ function closeFeedback() {
   const c = document.getElementById('feedback-content');
   c.classList.remove('open');
   document.getElementById('feedback-toggle').querySelector('svg').style.transform = '';
-  rating = 0;
+  const t = tabs[activeTabId];
+  if (t) { t.rating = 0; t.comment = ''; }
   document.querySelectorAll('.star').forEach(s => s.classList.remove('filled'));
   document.getElementById('feedback-text').value = '';
 }
@@ -1425,25 +1654,43 @@ document.getElementById('feedback-toggle').addEventListener('click', () => {
 document.getElementById('stars').addEventListener('click', e => {
   const s = e.target.closest('.star');
   if (!s) return;
-  rating = parseInt(s.dataset.v);
-  document.querySelectorAll('.star').forEach(x => x.classList.toggle('filled', parseInt(x.dataset.v) <= rating));
+  const t = tabs[activeTabId];
+  if (!t) return;
+  t.rating = parseInt(s.dataset.v);
+  document.querySelectorAll('.star').forEach(x => x.classList.toggle('filled', parseInt(x.dataset.v) <= t.rating));
+});
+
+document.getElementById('feedback-text').addEventListener('input', e => {
+  const t = tabs[activeTabId];
+  if (t) t.comment = e.target.value;
 });
 
 document.getElementById('btn-submit-feedback').addEventListener('click', async () => {
-  if (!chatHist.length) { toast('请先完成一轮问答', 'error'); return; }
-  if (rating < 1) { toast('请先选择评分星级', 'warning'); return; }
+  const t = tabs[activeTabId];
+  if (!t) return;
+  const history = t.messages.map(m => ({ role: m.role, content: m.content }));
+  if (!history.length) { toast('请先完成一轮问答', 'error'); return; }
+  if (t.rating < 1) { toast('请先选择评分星级', 'warning'); return; }
   const comment = document.getElementById('feedback-text').value.trim();
   try {
     const r = await fetch('/feedback', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rating, comment, history: chatHist, conversation_id: convId || '' }),
+      body: JSON.stringify({ rating: t.rating, comment, history, conversation_id: t.convId || '' }),
     });
     if (!r.ok) { const d = await r.json().catch(() => ({})); toast(d.error || '提交失败', 'error'); return; }
     toast('感谢您的反馈！');
     closeFeedback();
   } catch { toast('提交失败，请重试', 'error'); }
 });
+
+// 初始化：创建第一个并行对话标签
+(function initChatTabs() {
+  const t = createTab();
+  activeTabId = t.tabId;
+  renderTab(t.tabId);
+  renderTabBar();
+})();
 
 /* ══════════════════════════════════════════════════════════════
    设置页

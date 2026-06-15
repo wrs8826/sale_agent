@@ -26,15 +26,15 @@ interface AllSettings {
 
 type TestStatus = 'idle' | 'testing' | 'ok' | 'error'
 
-const CHAT_MODELS = ['qwen3-max', 'qwen-plus', 'qwen-turbo', 'gpt-4o-mini', 'gpt-4o', '自定义']
-const EMBED_MODELS = ['text-embedding-v4', 'text-embedding-v3', 'bge-large-zh']
+const CHAT_MODELS = ['deepseek-v4-pro', 'deepseek-chat', 'deepseek-reasoner', 'qwen3-max', 'gpt-4o-mini', 'gpt-4o', '自定义']
+const EMBED_MODELS = ['BAAI/bge-large-zh-v1.5', 'text-embedding-v4', 'text-embedding-v3']
 const RERANKER_MODELS = ['gte-rerank-v2', 'bge-reranker-v2-m3', '（禁用）']
 const INTERVALS = ['手动', '每小时', '每天', '每周']
 
 const DEFAULT: AllSettings = {
-  chat:     { api_key: '', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model_name: 'qwen3-max' },
+  chat:     { api_key: '', base_url: 'https://api.deepseek.com', model_name: 'deepseek-v4-pro' },
   cleaner:  { api_key: '', base_url: '', model_name: '', inherit: true },
-  embedding:{ api_key: '', base_url: '', model_name: 'text-embedding-v4', inherit: true },
+  embedding:{ api_key: '', base_url: '', model_name: 'BAAI/bge-large-zh-v1.5', inherit: true },
   reranker: { api_key: '', base_url: '', model_name: 'gte-rerank-v2', enabled: true, inherit: true },
   wiki:     { path: '', sync_interval: '手动' },
 }
@@ -104,9 +104,9 @@ const SettingsPage: React.FC = () => {
       if (!s) return
       setCfg(prev => ({
         ...prev,
-        chat:     { api_key: '', base_url: s.chat?.base_url ?? '', model_name: s.chat?.model_name ?? 'qwen3-max' },
+        chat:     { api_key: '', base_url: s.chat?.base_url ?? '', model_name: s.chat?.model_name ?? 'deepseek-v4-pro' },
         cleaner:  { ...prev.cleaner, base_url: s.cleaner?.base_url ?? '', model_name: s.cleaner?.model_name ?? '' },
-        embedding:{ ...prev.embedding, base_url: s.embedding?.base_url ?? '', model_name: s.embedding?.model_name ?? 'text-embedding-v4' },
+        embedding:{ ...prev.embedding, base_url: s.embedding?.base_url ?? '', model_name: s.embedding?.model_name ?? 'BAAI/bge-large-zh-v1.5' },
         reranker: { ...prev.reranker, base_url: s.reranker?.base_url ?? '', model_name: s.reranker?.model_name ?? 'gte-rerank-v2' },
       }))
     }).catch(() => {}).finally(() => setLoading(false))

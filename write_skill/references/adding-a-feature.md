@@ -118,6 +118,70 @@ curl -X POST http://127.0.0.1:5001/<my-path> -H "Content-Type: application/json"
 
 参见 `graph-patterns.md` "加节点的步骤"。
 
+## Recipe H：加新的 Skill（知识领域）
+
+一个 Skill 由三层组成，按以下步骤创建：
+
+### H1. 创建目录结构
+```
+skills/<新技能名>/
+├── SKILL.md
+└── references/
+    ├── 文件A.md
+    └── 文件B.md
+```
+
+### H2. 写 SKILL.md
+```markdown
+---
+name: <技能名（与目录名一致）>
+description: <单行简介，出现在 L1 skill 表的"覆盖范围"列>
+triggers:
+  - 触发关键词1
+  - 触发关键词2
+---
+
+# <技能名>顾问
+
+你是 <领域> 的专家，…（角色定位）
+
+**核心职责**：…
+
+## 文档地图
+
+| 问题类型 | 读取文件 |
+|---|---|
+| 问题A描述 | `references/文件A.md` |
+| 问题B描述 | `references/文件B.md` |
+
+## 回答原则
+
+…（数字引用、先结论后依据等）
+
+## 边界
+
+- 覆盖：…
+- 不覆盖：…
+```
+
+**文档地图规则**：`skill_name` = SKILL.md 的 `name` 字段（也是目录名）；`filename` 含 `.md` 后缀，与 `references/` 下实际文件名一致。模型通过文档地图决定调 `load_policy_file(skill_name, filename)`。
+
+### H3. 拆分 references 文件
+
+- 每个文件聚焦**一个子话题**，目标 400-800 字（模型读取整个文件，不要太大）
+- 命名格式：`<大类>_<子类>.md`，例如 `申报条件_创业领军.md`
+- 文件内容从原始政策文档中提取，保留关键数字、条件、截止日期
+
+### H4. 验证
+
+1. 启动服务后，触发关键词问一句，检查 SSE 的 `tool_start`/`tool_end` 事件确认工具被调用
+2. 检查 `tool_end` 的 `result` 字段是否包含文件内容（不是错误信息）
+3. 检查最终回答是否准确引用了文件中的数字/条件
+
+## Recipe I：加新的内置工具
+
+参见 `graph-patterns.md` "加内置工具的步骤"。
+
 ## 测试约定
 
 项目当前**没有自动化测试**。修改后：
@@ -138,6 +202,10 @@ curl -X POST http://127.0.0.1:5001/<my-path> -H "Content-Type: application/json"
 - [ ] 涉及 MySQL users 表 schema 变更 → `api/auth.py` 和 `api/users.py` 的读写 SQL 同步更新了？
 - [ ] 调用 `services.save_settings()` 的地方 → 改为解包二元组 `masked, embedding_changed = services.save_settings(...)`？
 - [ ] 加了新的需要登录才能访问的页面路由 → session 校验逻辑加了（参考 `app_user.py` / `app_admin.py` 现有路由）？
+- [ ] 加或改 Skill → SKILL.md 文档地图的文件名与 `references/` 实际文件名完全一致（含 `.md`）？
+- [ ] 拆分 references 文件后 → 旧大文件删除了，文档地图指向新文件了？
+- [ ] 加新内置工具 → 工具内 import `api.services` 等做了 lazy import（在函数内 import，不在模块顶层）？
+- [ ] 加新内置工具 → 工具函数追加到 `BUILTIN_TOOLS` 列表了？
 
 ## 不要做的事
 
@@ -146,3 +214,5 @@ curl -X POST http://127.0.0.1:5001/<my-path> -H "Content-Type: application/json"
 - ❌ 不要新建第三套加密方案 —— 用 `agent_service.security`
 - ❌ 不要为单次小修改"顺手重构"周边代码 —— 提案改动越小越好
 - ❌ 不要写新的 README.md / 注释文档 —— 除非用户明确要求；改动直接落地
+- ❌ 不要把 references/*.md 重新放进 RAG —— `all_refs_dirs()` 返回 `[]` 是 Path 2 架构的核心，不能改回
+- ❌ 不要在 SKILL.md 文档地图里写相对路径前缀（如 `skills/甬江人才政策/references/`）—— 只写 `references/文件名.md`，`load_policy_file` 会按 `skill_name` 拼路径
