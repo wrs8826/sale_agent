@@ -152,15 +152,22 @@ START ──route_input──┬─► read_file ──after_read──┬─►
 - 输出：`cleaned_text`
 - **复用 2 次**：`/ingest`（从文件读）+ `/feedback`（直接传 raw_text）+ 会话压缩（同样 raw_text 路径）
 
-### QA 主图（`graph/qa/`）
+### QA 主图（`graph/qa/`）—— 两种形态由 feature flag `agent_mode` 决定
+
+`build_qa_graph(agent_mode)` 编译不同图；`agent_mode` 来自 `services.get_agent_mode()`（env `AGENT_MODE` > config.yaml 顶层 `agent_mode` > `single`）。
 
 ```
-START → call_tools → extract_keywords ──after_extract──┬─► retrieve → generate → END
-                                                       └─► generate → END (rag_fn=None)
+single（默认）：START → call_tools → extract_keywords ──┬─► retrieve → generate → END
+                                                        └─► generate → END (rag_fn=None)
+react（多步循环）：START → extract_keywords ──┬─► retrieve → agent_react → END
+                                              └─► agent_react → END
 ```
 
-- 输入：`ChatState{query, history, chat_cfg, rag_fn, top_k, score_threshold, skill_system_prompt, skill_table, keywords, hits, tool_results, full_text, error}`
-- `call_tools` 节点优先执行：将 `skill_system_prompt`（含文档地图）注入给 LLM，LLM 按需调用内置工具（如 `load_policy_file`），结果写入 `tool_results`
+- **single**：`call_tools` 单趟一次工具调用 → 结果注入 `generate` 系统提示。
+- **react**：先 `extract_keywords`+`retrieve` 预检索作 RAG grounding，再 `agent_react` 节点用 `create_react_agent`（与飞书主路径同款）多步 思考→调工具→观察 循环（`max_tool_rounds=5` → `recursion_limit`），最终流式作答。节点内用 `astream_events(v2)` 把 `on_chat_model_stream→token`、`on_tool_start/-end→tool_*` 映射回既有 SSE；工具记录汇总成一个 `tool_turn` 供持久化（Phase 0）。**网页端 + 飞书降级路径都按此 flag 切换**；飞书主路径本就是 ReAct。
+  - **硬化**：① 调工具的 LLM 轮靠 `tool_call_chunks` 识别后**不外流其文本**（避免中间思考泄漏）；`full_text` 取自"无 tool_calls 的 `on_chat_model_end`"（权威终轮答案），前端 `done` 定型到它；② 超 `max_tool_rounds`（GraphRecursionError）时做一次**无工具强制收尾作答**（`_forced_answer`，附上已获取工具结果，流式）。
+- 输入：`ChatState{query, history, chat_cfg, rag_fn, top_k, score_threshold, skill_system_prompt, skill_table, web_tools, agent_mode, max_tool_rounds, keywords, hits, tool_results, full_text, error}`
+- `call_tools` 节点（single）优先执行：将 `skill_system_prompt`（含文档地图）注入给 LLM，LLM 按需调用内置工具（如 `load_policy_file`），结果写入 `tool_results`
 - 节点用 `langgraph.config.get_stream_writer()` 推 SSE 事件
 - 外层用 `graph.stream(state, stream_mode="custom")` 直接转发为 SSE 流
 - `retrieve` 节点内部 `HybridRetriever.search()`（`agent_service/rag/simple_rag.py`）用 `ThreadPoolExecutor` 并行执行 BM25 检索与向量检索（embedding API 调用 + Chroma 查询），再做混合分数融合
@@ -245,12 +252,41 @@ generate_node：skill_prompt + tool_results → 回答
 
 ### 内置工具（`agent_service/mcp/builtin_tools.py`）
 
-| 工具名 | 参数 | 用途 |
-|---|---|---|
-| `load_policy_file` | `skill_name, filename` | 读取 `skills/<skill_name>/references/<filename>` 全文 |
-| `get_current_time` | `timezone` | 获取当前日期时间 |
+| 工具名 | 参数 | 用途 | 工具集 |
+|---|---|---|---|
+| `load_policy_file` | `skill_name, filename` | 读取 `skills/<skill_name>/references/<filename>` 全文 | 核心 |
+| `get_current_time` | `timezone` | 获取当前日期时间 | 核心 |
+| `generate_word_document` | `title, sections, filename?` | 生成 .docx 落 `downloads/`，返回 `/download/<file>` 链接 | 核心 |
+| `read_document` | `filename` | 读取 `docs/` 中某文件的整篇文本（PDF/.docx/纯文本），过长截断；文件不存在时返回可用列表 | 仅网页 |
+| `list_documents` | — | 列出 `docs/` 中可读取的文件名 | 仅网页 |
 
-新增工具：在 `builtin_tools.py` 加 `@tool` 函数，追加到 `BUILTIN_TOOLS` 列表即可。
+**两套工具集（飞书隔离）**：
+- `BUILTIN_TOOLS` = 核心工具，网页端与飞书 QA 降级路径共用。
+- `WEB_TOOLS` = 核心 + 文档读取工具（`read_document` / `list_documents`），**仅网页端**启用。
+- 区分方式：`ChatState.web_tools` 标志。`api/agent.py` 构建 state 时置 `web_tools=True`；
+  `lark_bot._query()`（飞书主路径 MCP Agent + 降级路径 QA 图）都不带此标志，故飞书拿不到文档读取工具。
+- `call_tools_node` 与 `generate_node`（`build_tool_table(tools)`）都按 `state.get("web_tools")` 选择工具集。
+
+**文档文本提取**：`extract_text_from_file(path)` 是 `read_document` 工具与 `/ingest` 清洗的单一实现：
+`.pdf`→PyMuPDF、`.docx`→python-docx（段落+表格）、纯文本→UTF-8 读取；`.doc` 与缺依赖时抛错。
+
+新增工具：在 `builtin_tools.py` 加 `@tool` 函数，追加到 `BUILTIN_TOOLS`（核心，飞书也要用）
+或仅 `WEB_TOOLS`（仅网页端）。若要给飞书 MCP 路径用，还需在 `builtin_mcp_server.py` 加 `@mcp_server.tool()` 转发。
+
+#### 两个 MCP server（飞书路径的工具来源）
+
+`lark_mcp.json` 的 `mcpServers` 注册两个 stdio MCP server，`mcp_manager` 用 `MultiServerMCPClient`
+把两者工具**合并**后注入飞书 ReAct Agent：
+
+| MCP server | 启动命令 | 工具 |
+|---|---|---|
+| `lark-mcp` | `npx @larksuiteoapi/lark-mcp` | 纯飞书 API 工具（通讯录/消息/文档…） |
+| `builtin-tools` | `python -m agent_service.mcp.builtin_mcp_server` | 3 个核心工具：`get_current_time` / `load_policy_file` / `generate_word_document` |
+
+- 两个 server 都注入飞书 Agent；飞书因此可查时间、查政策原文、生成 Word。
+- 文档读取工具（`read_document` / `list_documents`）**不在任一 MCP server**，只走网页端 `WEB_TOOLS`，飞书拿不到。
+- 网页端不消费 MCP，直接 bind `BUILTIN_TOOLS`/`WEB_TOOLS`；MCP server 仅服务飞书路径。
+- **下载链接绝对化**：`generate_word_document` 默认返回相对 `/download/<file>`（网页端浏览器自解析）；飞书路径在 `builtin_mcp_server.py` 转发层用 `_public_base_url()`（读 `lark_mcp.json` 的 `public_base_url`，缺省回退 `oauth_redirect_uri` 的 origin）把它重写为绝对 URL，便于飞书用户点击。`/download` 路由公开（无 `login_required`），故无需登录即可下载。
 
 ### 文档地图约定（SKILL.md body）
 

@@ -1,11 +1,12 @@
 import React from 'react'
-import { BookOpen, MessageSquare, Users, Settings, LogOut, Bot } from 'lucide-react'
+import { BookOpen, MessageSquare, Users, Settings, LogOut, Bot, ScrollText } from 'lucide-react'
 import { useApp } from '../context/AppContext'
 import type { Page } from '../types'
 
 const items: { page: Page; icon: React.ReactNode; label: string }[] = [
   { page: 'knowledge', icon: <BookOpen size={18} />,      label: '知识库管理' },
   { page: 'chat',      icon: <MessageSquare size={18} />, label: 'Agent 对话' },
+  { page: 'policy',    icon: <ScrollText size={18} />,    label: '政策 Skill' },
   { page: 'users',     icon: <Users size={18} />,         label: '用户管理' },
   { page: 'settings',  icon: <Settings size={18} />,      label: '系统设置' },
 ]

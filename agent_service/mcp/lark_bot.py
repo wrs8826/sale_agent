@@ -397,6 +397,7 @@ class LarkBot:
             except Exception:
                 return []
 
+        agent_mode = services.get_agent_mode()   # 降级路径同切 ReAct（与网页端一致）
         state = {
             "query": text,
             "history": history,
@@ -406,11 +407,14 @@ class LarkBot:
             "score_threshold": services.load_rag_threshold(),
             "skill_system_prompt": skill_prompt or None,
             "skill_table": build_skill_table(),   # L1 常驻注入
+            "agent_mode": agent_mode,
+            "max_tool_rounds": 5,
+            # 不设 web_tools：飞书仅核心工具集（不含文档读取）
         }
 
         full_text = ""
         try:
-            for event in build_qa_graph().stream(state, stream_mode="custom"):
+            for event in build_qa_graph(agent_mode).stream(state, stream_mode="custom"):
                 if event.get("type") == "done":
                     full_text = event.get("full_text", "")
         except Exception as exc:

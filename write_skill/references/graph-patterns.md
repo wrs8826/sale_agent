@@ -33,14 +33,18 @@ else:
 ```
 qa/
 ├── prompts.py   # EXTRACT_SYSTEM, build_generate_system()
-├── nodes.py     # call_tools_node, extract_keywords_node, retrieve_node, generate_node
+├── nodes.py     # call_tools_node, extract_keywords_node, retrieve_node, generate_node, agent_react_node
 ├── edges.py     # after_extract (rag_fn None → skip retrieve)
-└── build.py     # build_qa_graph()
+└── build.py     # build_qa_graph(agent_mode)
 ```
 
-图流程：`START → call_tools → extract_keywords → retrieve? → generate → END`
+图流程（由 feature flag `agent_mode` 决定，`build_qa_graph(agent_mode)`）：
+- **single**（默认）：`START → call_tools → extract_keywords → retrieve? → generate → END`
+- **react**：`START → extract_keywords → retrieve? → agent_react → END`（`agent_react_node` 用 `create_react_agent` 多步自主工具循环，预检索作 grounding，`max_tool_rounds=5`，`astream_events(v2)` 映射回 SSE）
 
-state：`ChatState{query, history, chat_cfg, rag_fn, top_k, score_threshold, skill_system_prompt, skill_table, keywords, hits, tool_results, full_text, error}`
+切换：`services.get_agent_mode()`（env `AGENT_MODE` > config.yaml 顶层 `agent_mode` > `single`）。网页端 `api/agent.py` 与飞书降级 `lark_bot._query()` 都按此 flag 编译图。
+
+state：`ChatState{query, history, chat_cfg, rag_fn, top_k, score_threshold, skill_system_prompt, skill_table, web_tools, agent_mode, max_tool_rounds, keywords, hits, tool_results, full_text, error}`
 
 **调用方式（流式 stream）**：
 ```python
@@ -134,18 +138,24 @@ def extract_keywords_node(state):
        # 实现
        return result
    ```
-2. 将函数追加到 `BUILTIN_TOOLS`：
+2. 追加到对应工具集（两套）：
    ```python
-   BUILTIN_TOOLS = [get_current_time, load_policy_file, my_tool]
+   # 核心集：网页端 + 飞书 QA 降级共用
+   BUILTIN_TOOLS = [get_current_time, load_policy_file, generate_word_document, my_tool]
+   # 网页端专属集 = 核心 + 文档读取工具；仅用户端/管理员端启用
+   WEB_TOOLS = BUILTIN_TOOLS + [read_document, list_documents]
    ```
+   - 全局通用（飞书也要）→ 加 `BUILTIN_TOOLS`；仅网页端 → 只加 `WEB_TOOLS`。
+   - 区分靠 `ChatState.web_tools` 标志：`api/agent.py` 构建 state 时置 `True`；飞书路径（`lark_bot._query()` 两条）都不带，故只拿核心集。
 3. 工具内 import `api.services` / `agent_service` 模块时必须做**函数内 lazy import**（避免循环依赖）：
    ```python
    def my_tool(...):
        from agent_service import SKILLS_ROOT   # 函数内 import，OK
        ...
    ```
-4. 不需要改 `call_tools_node`：节点自动遍历 `BUILTIN_TOOLS` 列表执行工具。
-5. 工具结果会通过 `TOOL_RESULTS_PREFIX` 拼入 generate_node 的 system prompt，格式：
+4. 不需要改 `call_tools_node` / `generate_node`：两者都按 `state.get("web_tools")` 选 `WEB_TOOLS`/`BUILTIN_TOOLS`，自动 `bind_tools` 并把清单注入 `build_tool_table(tools)`。
+5. 要给**飞书 MCP 路径**也用 → 还需在 `builtin_mcp_server.py` 加 `@mcp_server.tool()` 转发（仅网页端工具**不要**转发）。
+6. 工具结果会通过 `TOOL_RESULTS_PREFIX` 拼入 generate_node 的 system prompt，格式：
    ```
    ──── 工具查询结果 ────
    <tool_name>: <result_text>

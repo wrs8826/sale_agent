@@ -40,6 +40,15 @@ CSS 样式在 `user.html` 的 `/* Markdown */` 区块：`p / strong / em / ul / 
 ⚠️ 宽度约束与对齐**放在 `.msg-content` 上**，不要放在 `.msg-bubble`：`.msg-content { max-width:76%; min-width:0 }`，用户 `align-items:flex-end`、AI `flex-start`；`.msg-bubble { max-width:100%; word-break:break-word; overflow-wrap:anywhere }`。
 若把 `max-width` 留在气泡而包装无约束/无对齐，长消息时包装撑满整行、气泡在其中左对齐，会出现「气泡贴左、头像在右、中间大空隙」。
 
+#### 消息气泡下方的时间（`.msg-time`）
+
+气泡 meta 区显示的是**该消息的发送时间**，而非渲染时刻：
+
+- 后端 `append_turn`（`api/conversations.py`）给每条消息写入 `ts`（UTC ISO，`datetime.now(timezone.utc).isoformat`），一轮 user+assistant 共用同一个 `ts`；`GET /conversations/<id>` 把 `messages[].ts` 原样返回。
+- 前端用 `fmtTimeFromIso(iso)` 把 UTC `ts` 解析为本地 `年/月/日 时:分`（统一格式常量 `_TIME_FMT`，`toLocaleString('zh-CN', _TIME_FMT)`，解析失败返回空串），**仅在加载历史会话时**用它填充每条消息的 `time` 字段（`web/user.html` 的 `loadConversation` map、`web-admin/src/pages/ChatPage.tsx` 的 `loadConversation` map）。
+- **实时发送**时不依赖后端 `ts`：发送入口先 `const sendTime = fmtTime()` 取一次本地时间，user 消息与本轮 assistant 消息（含 token/done/error/网络异常各分支）全部复用 `sendTime`，与后端「一轮共用一个 ts」保持一致，重新加载该会话时时间不跳变。
+- ⚠️ 不要在 `appendMsg` / 各推送分支里直接调用 `fmtTime()` 取「当前时刻」——切换标签或重渲染会把时间刷成打开时刻。时间必须随消息对象（`MsgItem.time` / tab 内 `messages[].time`）存储并透传。`appendMsg(role, html, { time })` 缺省回退 `fmtTime()` 仅作兜底。
+
 ### 注意
 
 - `marked.parse()` 返回完整 HTML 字符串，直接赋给 `element.innerHTML`
@@ -279,6 +288,15 @@ if (ev.type === 'token') {
   if (ev.full_text) agentText = ev.full_text;
 }
 ```
+
+#### 对话内文件上传（回形针）
+
+对话输入框右侧（发送按钮旁）有回形针按钮，用于在聊天界面直接上传文件让助手读取。两端实现一致：
+
+- **复用 `/upload`**：点击回形针 → 选择文件（`accept=".txt,.md,.rst,.html,.pdf,.docx"`）→ `POST /upload`（FormData，无需改后端）。文件落 `DOCS_DIR`，与「上传资料」页同一套；上传成功后调 `checkKbStatus()` 刷新知识库状态。
+- **每标签一份待发附件**：状态存 tab（`web/user.html` 的 `t.attachment={filename}`、`ChatPage.tsx` 的 `TabState.attachment`），切标签互不干扰；输入框上方渲染附件 chip（含 ✕ 移除）。
+- **附件并入下一条消息**：发送时把文件名拼进发往后端的 `message`——有正文时追加「📎 附件文件：<名>（如需文件内容，请用 read_document 读取）」，无正文时用「请阅读并总结我上传的文件：<名>」。空输入但有附件也允许发送。发送后清空 `attachment`。
+- **闭环**：消息里的文件名 + `.pdf/.docx` 等会命中 `文档读取` skill（触发词含「附件」「上传的文件」「pdf」「docx」等），且 `read_document` 工具在网页端 `WEB_TOOLS` 中常驻可用，模型据此读取整篇原文作答。**纯前端改动，后端零改动。**
 
 **反馈**：`POST /feedback {rating, comment, history: chatHist, conversation_id}`
 - `history` 字段**必须**传，后端校验 `if not history: 400`

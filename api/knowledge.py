@@ -6,17 +6,20 @@ from pathlib import Path
 
 import chromadb
 from chromadb.config import Settings as _ChromaSettings
-from flask import Blueprint, Response, jsonify, request, send_file, stream_with_context
+from flask import Blueprint, Response, jsonify, request, send_file, session, stream_with_context
 
-from agent_service import CONFIG_PATH, DOCS_DIR, DOWNLOADS_DIR
+from agent_service import CONFIG_PATH, DOCS_DIR, DOWNLOADS_DIR, POLICY_STAGING_DIR
 from agent_service.graph import build_cleaning_graph
+from agent_service.mcp.builtin_tools import extract_text_from_file
 from agent_service.rag import DocumentChunker, EmbedderFactory
 
 from . import services
 
 bp = Blueprint("knowledge", __name__)
 
-ALLOWED_EXT = {".txt", ".md", ".rst", ".html"}
+ALLOWED_EXT = {".txt", ".md", ".rst", ".html", ".pdf", ".docx"}
+# 二进制文档：清洗入库时按文本提取，但不回写原文件（回写会损坏二进制原件）
+_BINARY_DOC_EXT = {".pdf", ".docx"}
 
 _CLEAN_SYSTEM = (
     "你是一个专业的知识库文档处理助手。请先判断输入文本的类型，再按对应规则处理。\n\n"
@@ -60,9 +63,20 @@ def upload():
         return jsonify({"error": "文件名为空"}), 400
     if Path(name).suffix.lower() not in ALLOWED_EXT:
         return jsonify({"error": f"仅支持: {', '.join(sorted(ALLOWED_EXT))}"}), 400
+
+    # kind=policy：政策材料走隔离暂存目录，不进 DOCS_DIR / 向量库，
+    # 由「政策 skill 更新」流（admin）解析并生成 skill 草稿。仅 admin 可上传政策材料。
+    kind = (request.form.get("kind") or "normal").strip().lower()
+    if kind == "policy":
+        if session.get("role") != "admin":
+            return jsonify({"error": "仅管理员可上传政策材料"}), 403
+        POLICY_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+        f.save(POLICY_STAGING_DIR / name)
+        return jsonify({"ok": True, "filename": name, "kind": "policy"})
+
     f.save(DOCS_DIR / name)
     services.invalidate_rag()
-    return jsonify({"ok": True, "filename": name})
+    return jsonify({"ok": True, "filename": name, "kind": "normal"})
 
 
 @bp.route("/files/<filename>", methods=["DELETE"])
@@ -226,10 +240,15 @@ def ingest():
     def generate():
         try:
             # Step 1: 读取（仍在 api 层做，因为需要 raw_preview）
+            # PDF/Word 走 extract_text_from_file 提取文本，纯文本类按 UTF-8 读取
             yield f"data: {json.dumps({'type':'reading','message':'读取文件内容...'}, ensure_ascii=False)}\n\n"
-            raw = target.read_text(encoding="utf-8", errors="ignore").strip()
+            try:
+                raw = extract_text_from_file(target).strip()
+            except Exception as exc:
+                yield f"data: {json.dumps({'type':'error','message':f'读取文件失败：{exc}'}, ensure_ascii=False)}\n\n"
+                return
             if not raw:
-                yield f"data: {json.dumps({'type':'error','message':'文件为空'}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type':'error','message':'文件为空或未提取到文本（扫描版 PDF 需 OCR）'}, ensure_ascii=False)}\n\n"
                 return
 
             # Step 2: 清洗（走清洗子图）
@@ -299,8 +318,9 @@ def ingest():
             )
             services.invalidate_rag()
 
-            # 将清洗后内容覆写原文件
-            target.write_text(cleaned, encoding="utf-8")
+            # 将清洗后内容覆写原文件（仅纯文本类；PDF/Word 二进制原件保留，供 read_document 读取）
+            if target.suffix.lower() not in _BINARY_DOC_EXT:
+                target.write_text(cleaned, encoding="utf-8")
 
             result = {
                 "type": "result",

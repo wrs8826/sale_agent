@@ -457,6 +457,46 @@
     .send-btn:disabled{ background: #93c5fd; cursor: not-allowed; }
     .send-btn.stopping { background: #ef4444; cursor: pointer; }
     .send-btn.stopping:hover { background: #dc2626; }
+    .attach-btn {
+      width: 34px; height: 34px; background: transparent;
+      border: none; border-radius: 9px; display: flex;
+      align-items: center; justify-content: center;
+      cursor: pointer; flex-shrink: 0; color: #6b7280;
+      transition: background .15s, color .15s, transform .1s;
+    }
+    .attach-btn:hover   { background: #eef2f7; color: #3b82f6; }
+    .attach-btn:active  { transform: scale(.93); }
+    .attach-btn.busy    { color: #93c5fd; cursor: wait; }
+    .attach-chip {
+      display: flex; align-items: center; gap: 7px;
+      max-width: 100%; margin-bottom: 8px; padding: 6px 10px;
+      background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 9px;
+      font-size: 12px; color: #3730a3; width: fit-content;
+    }
+    .attach-chip .chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 360px; }
+    .attach-chip .chip-x {
+      cursor: pointer; color: #6366f1; font-weight: 700; flex-shrink: 0;
+      border: none; background: none; padding: 0 2px; line-height: 1; font-size: 14px;
+    }
+    .attach-chip .chip-x:hover { color: #4338ca; }
+    /* 工具调用记录（Phase 0 工具轮持久化）：折叠卡片 */
+    .tool-msg {
+      align-self: flex-start; max-width: 78%; margin-left: 46px;
+      background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 11px;
+      font-size: 12px; color: #6b7280;
+    }
+    .tool-msg > summary {
+      cursor: pointer; list-style: none; user-select: none;
+      display: flex; align-items: center; gap: 7px; padding: 8px 11px;
+    }
+    .tool-msg > summary::-webkit-details-marker { display: none; }
+    .tool-msg .tool-name { font-weight: 600; color: #4b5563; }
+    .tool-msg .tool-args { color: #9ca3af; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tool-msg .tool-result {
+      margin: 0; padding: 0 11px 11px; font-size: 11px; line-height: 1.6;
+      white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto;
+      font-family: inherit; color: #6b7280;
+    }
 
     /* ══ 设置页 ══════════════════════════════════════════════════════ */
     .settings-body { flex: 1; overflow-y: auto; padding: 24px; }
@@ -618,12 +658,12 @@
       <div class="upload-center">
 
         <div class="dropzone" id="dropzone">
-          <input type="file" id="file-input" accept=".txt,.md,.rst,.html">
+          <input type="file" id="file-input" accept=".txt,.md,.rst,.html,.pdf,.docx">
           <div class="dropzone-icon">
             <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
           </div>
           <div class="dropzone-label">点击或拖拽文件到此处</div>
-          <div class="dropzone-hint">支持 .txt .md .rst .html 格式。上传后系统会自动清洗并写入知识库，完成后可在「智能问答」中使用。</div>
+          <div class="dropzone-hint">支持 .txt .md .rst .html .pdf .docx 格式。上传后系统会自动清洗并写入知识库，完成后可在「智能问答」中使用，也可让助手直接读取整篇内容。</div>
         </div>
 
         <div class="upload-actions">
@@ -706,8 +746,13 @@
           <div class="kb-dot" id="kb-dot"></div>
           <span id="kb-status-text">检查知识库状态…</span>
         </div>
+        <div class="attach-chip" id="attach-chip" style="display:none"></div>
         <div class="chat-input-box">
           <textarea id="chat-input" rows="1" placeholder="输入您的问题，Enter 发送（Shift+Enter 换行）"></textarea>
+          <input type="file" id="chat-file-input" accept=".txt,.md,.rst,.html,.pdf,.docx" style="display:none">
+          <button class="attach-btn" id="attach-btn" title="上传文件（PDF / Word / 文本）">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          </button>
           <button class="send-btn" id="send-btn" disabled>
             <svg class="icon-send" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             <svg class="icon-stop" width="13" height="13" viewBox="0 0 24 24" fill="currentColor" style="display:none"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
@@ -873,8 +918,21 @@ function toast(msg, type = 'success') {
   setTimeout(() => el.remove(), 3200);
 }
 
+const _TIME_FMT = {
+  year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', hour12: false,
+};
+
 function fmtTime() {
-  return new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  return new Date().toLocaleString('zh-CN', _TIME_FMT);
+}
+
+// 把后端存储的 ISO 时间（UTC）格式化为本地 年/月/日 时:分；解析失败则返回空串
+function fmtTimeFromIso(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleString('zh-CN', _TIME_FMT);
 }
 
 function fmtDate(iso) {
@@ -1062,6 +1120,9 @@ const chatBody    = document.getElementById('chat-body');
 const chatWelcome = document.getElementById('chat-welcome');
 const chatInput   = document.getElementById('chat-input');
 const sendBtn     = document.getElementById('send-btn');
+const attachBtn   = document.getElementById('attach-btn');
+const chatFileInput = document.getElementById('chat-file-input');
+const attachChip  = document.getElementById('attach-chip');
 const feedbackBar = document.getElementById('feedback-bar');
 const convList    = document.getElementById('conv-list');
 const chatTabsEl  = document.getElementById('chat-tabs');
@@ -1088,6 +1149,7 @@ function createTab(opts = {}) {
     streaming: false,
     thinking: false,
     input: '',
+    attachment: null,   // { filename } —— 回形针上传后待随下条消息发送的文件
     abortFn: null,
   };
   tabs[t.tabId] = t;
@@ -1164,8 +1226,9 @@ function renderTab(tabId) {
   } else {
     chatWelcome.style.display = 'none';
     for (const m of t.messages) {
+      if (m.role === 'tool') { appendToolMsg(m); continue; }
       const row = appendMsg(m.role === 'user' ? 'user' : 'agent',
-        renderMd(m.content || (m.streaming ? '…' : '')), { fromHistory: true });
+        renderMd(m.content || (m.streaming ? '…' : '')), { fromHistory: true, time: m.time });
       row.dataset.msgId = m.id;
     }
   }
@@ -1191,6 +1254,7 @@ function renderTab(tabId) {
   sendBtn.querySelector('.icon-send').style.display = t.streaming ? 'none' : '';
   sendBtn.querySelector('.icon-stop').style.display = t.streaming ? '' : 'none';
   sendBtn.title = t.streaming ? '停止生成' : '发送';
+  renderAttachChip(t);
 
   document.querySelectorAll('.conv-item').forEach(el => {
     el.classList.toggle('active', !!t.convId && el.dataset.id === t.convId);
@@ -1301,7 +1365,7 @@ async function switchConversation(id) {
     if (!r.ok) { toast('加载会话失败', 'error'); return; }
     const conv = await r.json();
 
-    const msgs = (conv.messages || []).map(m => ({ id: genId(), role: m.role, content: m.content }));
+    const msgs = (conv.messages || []).map(m => ({ id: genId(), role: m.role, content: m.content, name: m.name, args: m.args, time: fmtTimeFromIso(m.ts) }));
     const t = createTab({
       convId: id,
       title: conv.title || '对话',
@@ -1394,7 +1458,7 @@ async function checkKbStatus() {
 }
 
 /* ── 消息渲染 ──────────────────────────────────────────────────── */
-function appendMsg(role, html, { fromHistory } = {}) {
+function appendMsg(role, html, { fromHistory, time } = {}) {
   const init = role === 'user' ? (_username[0] || 'U').toUpperCase() : 'AI';
   const row = document.createElement('div');
   row.className = `msg-row ${role}`;
@@ -1403,13 +1467,30 @@ function appendMsg(role, html, { fromHistory } = {}) {
     <div class="msg-content">
       <div class="msg-bubble">${html}</div>
       <div class="msg-meta">
-        <span class="msg-time">${fmtTime()}</span>
+        <span class="msg-time">${time || fmtTime()}</span>
         ${role !== 'user' ? '<button class="copy-btn" onclick="navigator.clipboard.writeText(this.closest(\'.msg-row\').querySelector(\'.msg-bubble\').innerText);this.textContent=\'已复制\'">复制</button>' : ''}
       </div>
     </div>`;
   chatBody.appendChild(row);
   if (!fromHistory) chatBody.scrollTop = chatBody.scrollHeight;
   return row;
+}
+
+/* 渲染历史里的工具调用记录（Phase 0 工具轮持久化）：折叠卡片 */
+function appendToolMsg(m) {
+  const det = document.createElement('details');
+  det.className = 'tool-msg';
+  const argsStr = (m.args && Object.keys(m.args).length) ? esc(JSON.stringify(m.args)) : '';
+  det.innerHTML =
+    '<summary>' +
+    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0">' +
+    '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>' +
+    '<span class="tool-name">工具 ' + esc(m.name || '') + '</span>' +
+    (argsStr ? '<span class="tool-args">' + argsStr + '</span>' : '') +
+    '</summary>' +
+    '<pre class="tool-result">' + esc(m.content || '') + '</pre>';
+  chatBody.appendChild(det);
+  return det;
 }
 
 function appendThinking() {
@@ -1431,7 +1512,9 @@ chatInput.addEventListener('input', () => {
   chatInput.style.height = Math.min(chatInput.scrollHeight, 160) + 'px';
   const t = tabs[activeTabId];
   if (t) t.input = chatInput.value;
-  sendBtn.disabled = t ? (t.streaming ? false : !chatInput.value.trim()) : !chatInput.value.trim();
+  const hasAttach = !!(t && t.attachment);
+  sendBtn.disabled = t ? (t.streaming ? false : (!chatInput.value.trim() && !hasAttach))
+                       : !chatInput.value.trim();
 });
 chatInput.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -1447,20 +1530,100 @@ sendBtn.addEventListener('click', () => {
   doSend();
 });
 
+/* ── 回形针上传：上传到知识库（/upload），随下条消息让助手读取 ───────────── */
+const _ATTACH_EXTS = ['.txt', '.md', '.rst', '.html', '.pdf', '.docx'];
+
+attachBtn.addEventListener('click', () => {
+  const t = tabs[activeTabId];
+  if (!t || t.streaming || attachBtn.classList.contains('busy')) return;
+  chatFileInput.click();
+});
+
+chatFileInput.addEventListener('change', async () => {
+  const file = chatFileInput.files && chatFileInput.files[0];
+  chatFileInput.value = '';   // 允许重复选择同一文件
+  if (!file) return;
+  const name = file.name;
+  const ext = name.slice(name.lastIndexOf('.')).toLowerCase();
+  if (!_ATTACH_EXTS.includes(ext)) {
+    toast('仅支持 .txt .md .rst .html .pdf .docx', 'error');
+    return;
+  }
+  const tabId = activeTabId;
+  const t = tabs[tabId];
+  if (!t) return;
+
+  attachBtn.classList.add('busy');
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const r = await fetch('/upload', { method: 'POST', body: fd });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.ok) {
+      toast(data.error || '上传失败', 'error');
+      return;
+    }
+    t.attachment = { filename: data.filename };
+    if (tabId === activeTabId) {
+      renderAttachChip(t);
+      sendBtn.disabled = false;  // 有附件即可发送（即便输入框为空）
+    }
+    checkKbStatus();
+    toast('已上传：' + data.filename, 'success');
+  } catch (e) {
+    toast('上传出错：' + e.message, 'error');
+  } finally {
+    attachBtn.classList.remove('busy');
+  }
+});
+
+/* 渲染当前 tab 的附件 chip（含移除按钮） */
+function renderAttachChip(t) {
+  if (!t || !t.attachment) { attachChip.style.display = 'none'; attachChip.innerHTML = ''; return; }
+  attachChip.style.display = 'flex';
+  attachChip.innerHTML =
+    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0">' +
+    '<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>' +
+    '<span class="chip-name">' + esc(t.attachment.filename) + '</span>' +
+    '<button class="chip-x" title="移除附件" onclick="removeAttachment()">✕</button>';
+}
+
+function removeAttachment() {
+  const t = tabs[activeTabId];
+  if (!t) return;
+  t.attachment = null;
+  renderAttachChip(t);
+  sendBtn.disabled = t.streaming ? false : !chatInput.value.trim();
+}
+
 /* 发送消息：绑定到调用时的 activeTabId，后台流式更新该 tab，与当前激活标签无关 */
 async function doSend() {
   const tabId = activeTabId;
   const t = tabs[tabId];
   if (!t) return;
-  const msg = chatInput.value.trim();
-  if (!msg || t.streaming) return;
+  const typed = chatInput.value.trim();
+  const attachment = t.attachment;
+  if ((!typed && !attachment) || t.streaming) return;
 
+  // 组装实际发送的消息：带附件时附上文件名，引导助手用 read_document 读取
+  let msg;
+  if (attachment) {
+    const fn = attachment.filename;
+    msg = typed
+      ? `${typed}\n\n📎 附件文件：${fn}（如需文件内容，请用 read_document 读取）`
+      : `请阅读并总结我上传的文件：${fn}`;
+  } else {
+    msg = typed;
+  }
+
+  t.attachment = null;   // 附件已并入本条消息，清空待发区
   t.input = '';
   t.streaming = true;
   t.thinking = true;
   if (tabId === activeTabId) {
     chatInput.value = '';
     chatInput.style.height = 'auto';
+    renderAttachChip(t);   // 隐藏已并入消息的附件 chip
     // 流式期间按钮切到「停止」态且保持可点，使用户可中断
     sendBtn.disabled = false;
     sendBtn.classList.add('stopping');
@@ -1470,10 +1633,11 @@ async function doSend() {
   }
 
   const userMsgId = genId();
-  t.messages.push({ id: userMsgId, role: 'user', content: msg });
+  const sendTime = fmtTime();
+  t.messages.push({ id: userMsgId, role: 'user', content: msg, time: sendTime });
   if (tabId === activeTabId) {
     chatWelcome.style.display = 'none';
-    const row = appendMsg('user', renderMd(msg));
+    const row = appendMsg('user', renderMd(msg), { time: sendTime });
     row.dataset.msgId = userMsgId;
     appendThinking();
   }
@@ -1501,11 +1665,11 @@ async function doSend() {
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       const errMsg = err.error || ('HTTP ' + res.status);
-      t.messages.push({ id: assistantId, role: 'assistant', content: `❌ ${errMsg}` });
+      t.messages.push({ id: assistantId, role: 'assistant', content: `❌ ${errMsg}`, time: sendTime });
       t.thinking = false;
       if (tabId === activeTabId) {
         document.getElementById('thinking-row')?.remove();
-        appendMsg('agent', `<span style="color:#dc2626">${esc(errMsg)}</span>`).dataset.msgId = assistantId;
+        appendMsg('agent', `<span style="color:#dc2626">${esc(errMsg)}</span>`, { time: sendTime }).dataset.msgId = assistantId;
       }
       return;
     }
@@ -1530,7 +1694,7 @@ async function doSend() {
           agentText += ev.text || '';
           if (!started) {
             started = true;
-            t.messages.push({ id: assistantId, role: 'assistant', content: agentText, streaming: true });
+            t.messages.push({ id: assistantId, role: 'assistant', content: agentText, streaming: true, time: sendTime });
           } else {
             const m = t.messages.find(x => x.id === assistantId);
             if (m) m.content = agentText;
@@ -1541,7 +1705,7 @@ async function doSend() {
             document.getElementById('thinking-row')?.remove();
             let row = chatBody.querySelector(`[data-msg-id="${assistantId}"]`);
             if (!row) {
-              row = appendMsg('agent', '');
+              row = appendMsg('agent', '', { time: sendTime });
               row.dataset.msgId = assistantId;
             }
             row.querySelector('.msg-bubble').innerHTML = renderMd(agentText);
@@ -1550,7 +1714,7 @@ async function doSend() {
         } else if (ev.type === 'done') {
           if (ev.full_text) agentText = ev.full_text;
           if (!started) {
-            t.messages.push({ id: assistantId, role: 'assistant', content: agentText });
+            t.messages.push({ id: assistantId, role: 'assistant', content: agentText, time: sendTime });
           } else {
             const m = t.messages.find(x => x.id === assistantId);
             if (m) { m.content = agentText; m.streaming = false; }
@@ -1560,7 +1724,7 @@ async function doSend() {
             document.getElementById('thinking-row')?.remove();
             let row = chatBody.querySelector(`[data-msg-id="${assistantId}"]`);
             if (!row) {
-              row = appendMsg('agent', '');
+              row = appendMsg('agent', '', { time: sendTime });
               row.dataset.msgId = assistantId;
             }
             row.querySelector('.msg-bubble').innerHTML = renderMd(agentText || '（无回答）');
@@ -1574,6 +1738,13 @@ async function doSend() {
             _incCount(tabId);
           }
           if (_getCount(tabId) >= 2 && tabId === activeTabId) _showCompactTipFor(t);
+        } else if (ev.type === 'circuit_break') {
+          // L4 熔断：服务端已对全局历史强制压缩并把计数清零（DB 持久化）。同步本地计数、撤掉旧提示。
+          _setCount(tabId, 0);
+          if (tabId === activeTabId) {
+            document.getElementById('compact-tip')?.remove();
+            toast('对话历史已自动全局压缩（熔断），上下文已精简', 'success');
+          }
         } else if (ev.type === 'conversation_saved') {
           t.convId = ev.conversation_id;
           if (ev.title) t.title = ev.title;
@@ -1582,7 +1753,7 @@ async function doSend() {
           loadConvList();
         } else if (ev.type === 'error') {
           if (!started) {
-            t.messages.push({ id: assistantId, role: 'assistant', content: `❌ ${ev.message}` });
+            t.messages.push({ id: assistantId, role: 'assistant', content: `❌ ${ev.message}`, time: sendTime });
           } else {
             const m = t.messages.find(x => x.id === assistantId);
             if (m) { m.content = `❌ ${ev.message}`; m.streaming = false; }
@@ -1591,7 +1762,7 @@ async function doSend() {
           if (tabId === activeTabId) {
             document.getElementById('thinking-row')?.remove();
             let row = chatBody.querySelector(`[data-msg-id="${assistantId}"]`);
-            if (!row) { row = appendMsg('agent', ''); row.dataset.msgId = assistantId; }
+            if (!row) { row = appendMsg('agent', '', { time: sendTime }); row.dataset.msgId = assistantId; }
             row.querySelector('.msg-bubble').innerHTML = `<span style="color:#dc2626">${esc(ev.message)}</span>`;
           }
         }
@@ -1601,12 +1772,12 @@ async function doSend() {
     if (!aborted) {
       const m = t.messages.find(x => x.id === assistantId);
       if (m) { m.content = `❌ 网络错误：${e.message}`; m.streaming = false; }
-      else t.messages.push({ id: assistantId, role: 'assistant', content: `❌ 网络错误：${e.message}` });
+      else t.messages.push({ id: assistantId, role: 'assistant', content: `❌ 网络错误：${e.message}`, time: sendTime });
       t.thinking = false;
       if (tabId === activeTabId) {
         document.getElementById('thinking-row')?.remove();
         let row = chatBody.querySelector(`[data-msg-id="${assistantId}"]`);
-        if (!row) { row = appendMsg('agent', ''); row.dataset.msgId = assistantId; }
+        if (!row) { row = appendMsg('agent', '', { time: sendTime }); row.dataset.msgId = assistantId; }
         row.querySelector('.msg-bubble').innerHTML = `<span style="color:#dc2626">网络错误：${esc(e.message)}</span>`;
       }
     }

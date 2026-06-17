@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react'
 import {
   Send, Square, Trash2, Bot, User, AlertCircle, Star,
   Plus, MessageSquare, Pencil, X, Check, Copy, ChevronDown,
-  Circle, UserCircle,
+  Circle, UserCircle, Paperclip, Wrench,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -11,8 +11,20 @@ import type { ChatMessage } from '../types'
 
 const genId = () => Math.random().toString(36).slice(2)
 
-const fmtTime = () =>
-  new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+const _TIME_FMT: Intl.DateTimeFormatOptions = {
+  year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', hour12: false,
+}
+
+const fmtTime = () => new Date().toLocaleString('zh-CN', _TIME_FMT)
+
+// 把后端存储的 ISO 时间（UTC）格式化为本地 年/月/日 时:分；解析失败则返回空串
+const fmtTimeFromIso = (iso?: string) => {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ''
+  return d.toLocaleString('zh-CN', _TIME_FMT)
+}
 
 const fmtDate = (iso: string) => {
   const d = new Date(iso)
@@ -51,6 +63,8 @@ interface TabState {
   feedbackExpanded: boolean
   feedbackComment: string
   rating: number
+  attachment?: { filename: string }   // 回形针上传后待随下条消息发送的文件
+  uploading?: boolean
 }
 
 const blankTab = (): TabState => ({
@@ -67,6 +81,8 @@ const blankTab = (): TabState => ({
   feedbackExpanded: false,
   feedbackComment: '',
   rating: 0,
+  attachment: undefined,
+  uploading: false,
 })
 
 const ChatPage: React.FC = () => {
@@ -90,6 +106,7 @@ const ChatPage: React.FC = () => {
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   // 每个 tab 一个中断函数，后台流不受标签切换影响
   const abortRefs = useRef<Record<string, () => void>>({})
 
@@ -172,11 +189,13 @@ const ChatPage: React.FC = () => {
       const res = await fetch(`/conversations/${id}`)
       if (!res.ok) throw new Error()
       const data = await res.json()
-      const msgs: MsgItem[] = (data.messages ?? []).map((m: { role: string; content: string }) => ({
+      const msgs: MsgItem[] = (data.messages ?? []).map((m: { role: string; content: string; ts?: string; name?: string; args?: Record<string, unknown> }) => ({
         id: genId(),
-        role: m.role as 'user' | 'assistant',
+        role: m.role as 'user' | 'assistant' | 'tool',
         content: m.content,
-        time: '',
+        name: m.name,
+        args: m.args,
+        time: fmtTimeFromIso(m.ts),
       }))
       const msgCount = msgs.length
       const isOther = data.user_id !== undefined && myUserId !== undefined && data.user_id !== myUserId
@@ -279,18 +298,62 @@ const ChatPage: React.FC = () => {
     setTimeout(() => setCopied(null), 1500)
   }
 
+  // 回形针上传：上传到知识库（/upload），随下条消息让助手用 read_document 读取
+  const ATTACH_EXTS = ['.txt', '.md', '.rst', '.html', '.pdf', '.docx']
+  const handleAttach = useCallback(async (file: File) => {
+    const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase()
+    if (!ATTACH_EXTS.includes(ext)) {
+      showToast('仅支持 .txt .md .rst .html .pdf .docx', 'error')
+      return
+    }
+    const tabId = activeTabId
+    updateTab(tabId, t => ({ ...t, uploading: true }))
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const r = await fetch('/upload', { method: 'POST', body: fd })
+      const data = await r.json().catch(() => ({}))
+      if (!r.ok || !data.ok) {
+        showToast(data.error || '上传失败', 'error')
+        return
+      }
+      updateTab(tabId, t => ({ ...t, attachment: { filename: data.filename } }))
+      checkKbStatus()
+      showToast(`已上传：${data.filename}`, 'success')
+    } catch (e) {
+      showToast(`上传出错：${e instanceof Error ? e.message : String(e)}`, 'error')
+    } finally {
+      updateTab(tabId, t => ({ ...t, uploading: false }))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTabId, updateTab, showToast])
+
   // 发送消息：绑定到具体 tabId，后台流式更新该 tab，与当前激活标签无关
   const sendMessage = useCallback(async (tabId: string) => {
     const tab = tabs[tabId]
     if (!tab) return
-    const text = tab.input.trim()
+    const typed = tab.input.trim()
+    const attachment = tab.attachment
     const isReadOnly = !!tab.convUserId && myUserId !== undefined && tab.convUserId !== myUserId
-    if (!text || tab.streaming || isReadOnly) return
+    if ((!typed && !attachment) || tab.streaming || isReadOnly) return
 
-    const userMsg: MsgItem = { id: genId(), role: 'user', content: text, time: fmtTime() }
+    // 组装实际发送的消息：带附件时附上文件名，引导助手用 read_document 读取
+    let text: string
+    if (attachment) {
+      const fn = attachment.filename
+      text = typed
+        ? `${typed}\n\n📎 附件文件：${fn}（如需文件内容，请用 read_document 读取）`
+        : `请阅读并总结我上传的文件：${fn}`
+    } else {
+      text = typed
+    }
+
+    const sendTime = fmtTime()
+    const userMsg: MsgItem = { id: genId(), role: 'user', content: text, time: sendTime }
     updateTab(tabId, t => ({
       ...t,
       input: '',
+      attachment: undefined,   // 附件已并入本条消息
       messages: [...t.messages, userMsg],
       thinking: true,
       streaming: true,
@@ -338,7 +401,7 @@ const ChatPage: React.FC = () => {
                 updateTab(tabId, t => ({
                   ...t,
                   thinking: false,
-                  messages: [...t.messages, { id: assistantId, role: 'assistant', content: '', streaming: true, time: fmtTime() }],
+                  messages: [...t.messages, { id: assistantId, role: 'assistant', content: '', streaming: true, time: sendTime }],
                 }))
               }
               fullText += evt.text
@@ -352,7 +415,7 @@ const ChatPage: React.FC = () => {
                 updateTab(tabId, t => ({
                   ...t,
                   thinking: false,
-                  messages: [...t.messages, { id: assistantId, role: 'assistant', content: fullText, time: fmtTime() }],
+                  messages: [...t.messages, { id: assistantId, role: 'assistant', content: fullText, time: sendTime }],
                   feedbackOpen: true,
                   feedbackExpanded: false,
                 }))
@@ -370,7 +433,7 @@ const ChatPage: React.FC = () => {
                 updateTab(tabId, t => ({
                   ...t,
                   thinking: false,
-                  messages: [...t.messages, { id: assistantId, role: 'assistant', content: `❌ ${evt.message}`, time: fmtTime() }],
+                  messages: [...t.messages, { id: assistantId, role: 'assistant', content: `❌ ${evt.message}`, time: sendTime }],
                 }))
               } else {
                 updateTab(tabId, t => ({
@@ -395,7 +458,7 @@ const ChatPage: React.FC = () => {
           updateTab(tabId, t => ({
             ...t,
             thinking: false,
-            messages: [...t.messages, { id: assistantId, role: 'assistant', content: `❌ ${msg}`, time: fmtTime() }],
+            messages: [...t.messages, { id: assistantId, role: 'assistant', content: `❌ ${msg}`, time: sendTime }],
           }))
         } else {
           updateTab(tabId, t => ({
@@ -652,6 +715,19 @@ const ChatPage: React.FC = () => {
           )}
 
           {activeTab.messages.map(msg => (
+            msg.role === 'tool' ? (
+              /* 工具调用记录（Phase 0 工具轮持久化）：折叠卡片，对齐在助手气泡下 */
+              <details key={msg.id} className="self-start max-w-[78%] ml-11 bg-[#f7f7f8] border border-[#e5e5e5] rounded-xl">
+                <summary className="cursor-pointer select-none px-3 py-2 flex items-center gap-2 text-xs text-[#6b6b6b]">
+                  <Wrench size={13} className="text-[#3b82f6] shrink-0" />
+                  <span className="font-medium">工具 {msg.name || ''}</span>
+                  {msg.args && Object.keys(msg.args).length > 0 && (
+                    <span className="text-[#9ca3af] truncate">{JSON.stringify(msg.args)}</span>
+                  )}
+                </summary>
+                <pre className="px-3 pb-3 text-[11px] leading-relaxed text-[#6b6b6b] whitespace-pre-wrap break-words max-h-[240px] overflow-y-auto">{msg.content}</pre>
+              </details>
+            ) : (
             <div key={msg.id} className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
               <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-0.5
                 ${msg.role === 'user' ? 'bg-[#f3f4f6]' : 'bg-gradient-to-br from-[#3b82f6] to-[#6366f1]'}`}>
@@ -684,6 +760,7 @@ const ChatPage: React.FC = () => {
                 </div>
               </div>
             </div>
+            )
           ))}
 
           {/* Thinking animation */}
@@ -768,6 +845,27 @@ const ChatPage: React.FC = () => {
                 <Circle size={6} className={`fill-current ${kbDotColor.replace('bg-', 'text-')}`} />
                 <span className="text-[11px] text-[#9ca3af]">{kbText}</span>
               </div>
+              {/* 附件 chip */}
+              {activeTab.attachment && (
+                <div className="flex items-center gap-1.5 w-fit max-w-full mb-2 px-2.5 py-1.5 bg-indigo-50 border border-indigo-200 rounded-lg text-xs text-indigo-800">
+                  <Paperclip size={12} className="shrink-0" />
+                  <span className="truncate max-w-[360px]">{activeTab.attachment.filename}</span>
+                  <button
+                    onClick={() => updateTab(activeTabId, t => ({ ...t, attachment: undefined }))}
+                    title="移除附件"
+                    className="shrink-0 text-indigo-500 hover:text-indigo-700"
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".txt,.md,.rst,.html,.pdf,.docx"
+                className="hidden"
+                onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) handleAttach(f) }}
+              />
               <div className="border border-[#e5e5e5] rounded-2xl bg-white shadow-sm overflow-hidden focus-within:border-[#3b82f6] transition-colors">
                 <textarea
                   ref={textareaRef}
@@ -779,13 +877,21 @@ const ChatPage: React.FC = () => {
                   className="w-full px-4 pt-3 pb-2 text-sm text-[#171717] resize-none focus:outline-none placeholder:text-[#9ca3af] bg-transparent"
                   style={{ minHeight: '44px', maxHeight: '180px' }}
                 />
-                <div className="flex items-center justify-end px-3 pb-3">
+                <div className="flex items-center justify-between px-3 pb-3">
+                  <button
+                    onClick={() => { if (!activeTab.uploading) fileInputRef.current?.click() }}
+                    disabled={!!activeTab.uploading}
+                    title="上传文件（PDF / Word / 文本）"
+                    className="w-8 h-8 flex items-center justify-center text-[#6b7280] rounded-lg transition-colors hover:bg-[#eef2f7] hover:text-[#3b82f6] disabled:opacity-40 disabled:cursor-wait"
+                  >
+                    <Paperclip size={16} />
+                  </button>
                   <button
                     onClick={() => {
                       if (activeTab.streaming) { abortRefs.current[activeTabId]?.(); return }
                       sendMessage(activeTabId)
                     }}
-                    disabled={!activeTab.streaming && !activeTab.input.trim()}
+                    disabled={!activeTab.streaming && !activeTab.input.trim() && !activeTab.attachment}
                     title={activeTab.streaming ? '停止生成' : '发送'}
                     className={`w-8 h-8 flex items-center justify-center text-white rounded-lg transition-all disabled:opacity-30 ${activeTab.streaming ? 'bg-red-500 hover:bg-red-600' : 'bg-[#3b82f6] hover:bg-[#2563eb]'}`}
                   >

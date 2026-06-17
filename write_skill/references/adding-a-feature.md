@@ -205,7 +205,8 @@ triggers:
 - [ ] 加或改 Skill → SKILL.md 文档地图的文件名与 `references/` 实际文件名完全一致（含 `.md`）？
 - [ ] 拆分 references 文件后 → 旧大文件删除了，文档地图指向新文件了？
 - [ ] 加新内置工具 → 工具内 import `api.services` 等做了 lazy import（在函数内 import，不在模块顶层）？
-- [ ] 加新内置工具 → 工具函数追加到 `BUILTIN_TOOLS` 列表了？
+- [ ] 加新内置工具 → 选对工具集：全局通用追加 `BUILTIN_TOOLS`（飞书也会拿到）；仅网页端只追加 `WEB_TOOLS`（靠 `ChatState.web_tools` 标志区分，`api/agent.py` 已置 `True`）？
+- [ ] 新内置工具要给飞书 MCP 路径用 → 在 `builtin_mcp_server.py` 加 `@mcp_server.tool()` 转发了？仅网页端则**不要**加转发。
 
 ## 不要做的事
 

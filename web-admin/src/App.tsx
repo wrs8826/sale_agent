@@ -9,6 +9,7 @@ const KnowledgePage = lazy(() => import('./pages/KnowledgePage'))
 const ChatPage      = lazy(() => import('./pages/ChatPage'))
 const UsersPage     = lazy(() => import('./pages/UsersPage'))
 const SettingsPage  = lazy(() => import('./pages/SettingsPage'))
+const PolicySkillPage = lazy(() => import('./pages/PolicySkillPage'))
 
 const Spinner = () => (
   <div className="flex items-center justify-center h-full">
@@ -44,6 +45,7 @@ const App: React.FC = () => {
     switch (currentPage) {
       case 'knowledge': return <KnowledgePage />
       case 'chat':      return <ChatPage />
+      case 'policy':    return <PolicySkillPage />
       case 'users':     return <UsersPage />
       case 'settings':  return <SettingsPage />
     }

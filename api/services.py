@@ -264,6 +264,22 @@ def load_rag_threshold() -> float:
         return 0.3
 
 
+def get_agent_mode() -> str:
+    """对话循环模式（feature flag / 灰度开关）：
+
+    'react'  → 多步自主工具循环（create_react_agent）
+    'single' → 单趟（call_tools 一次 → generate），默认
+
+    优先级：环境变量 AGENT_MODE > config.yaml 顶层 agent_mode > 'single'。
+    灰度：改 env 或 config.yaml 即可切换；后续可在此扩展按用户/百分比放量。
+    """
+    import os
+    raw = os.getenv("AGENT_MODE")
+    if raw is None:
+        raw = _read_raw_yaml().get("agent_mode")
+    return "react" if str(raw or "").strip().lower() == "react" else "single"
+
+
 def get_api_key() -> Optional[str]:
     """向后兼容：返回 chat 段的明文 key（embedder / 旧调用方使用）。"""
     return load_chat_settings()["api_key"] or None

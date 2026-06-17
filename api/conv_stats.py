@@ -13,6 +13,7 @@
     ensure_table()                          → 建表（幂等，app 启动时调用）
     get_compact_count(user_id, conv_id)     → int
     increment_compact_count(user_id, conv_id) → int   返回更新后的计数
+    reset_compact_count(user_id, conv_id)   → bool  清零（L4 熔断后，持久化进 DB）
 """
 from __future__ import annotations
 
@@ -121,3 +122,31 @@ def increment_compact_count(user_id: int, conversation_id: str) -> int:
     except Exception as exc:
         print(f"[conv_stats] increment_compact_count 失败: {exc}")
         return -1
+
+
+def reset_compact_count(user_id: int, conversation_id: str) -> bool:
+    """将自动压缩次数清零（L4 熔断后调用）。
+
+    持久化进 DB（行不存在则建零行），刷新/重启不会丢失"刚熔断过"的状态。
+    成功返回 True，出错 False（不中断主流程）。
+    """
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        conn = _get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO conversation_stats
+                    (user_id, conversation_id, auto_compact_count, last_compacted_at)
+                VALUES (%s, %s, 0, %s)
+                ON DUPLICATE KEY UPDATE
+                    auto_compact_count = 0,
+                    last_compacted_at  = %s
+                """,
+                (user_id, conversation_id, now, now),
+            )
+        conn.close()
+        return True
+    except Exception as exc:
+        print(f"[conv_stats] reset_compact_count 失败: {exc}")
+        return False

@@ -362,3 +362,19 @@ params={"department_id": root, "department_id_type": "open_department_id", ...}
 1. 查控制台：有 `[session_store] Redis 连接失败` → 回退 cookie session，功能正常但无 Redis 特性
 2. 若 `flask-session` 未安装 → 安装：`pip install flask-session redis`
 3. 若 Redis 密码错误 → 检查 `REDIS_PASSWORD` 环境变量（默认 `123456`）
+
+## 36. read_document 读已入库的 PDF/Word 报错 / 读到乱码
+
+**症状**：上传 PDF/Word 并点「清洗入库」后，再让助手 `read_document` 读该文件，PyMuPDF 解析失败或读到纯文本/乱码。
+
+**根因**：`/ingest` 默认会把清洗后的纯文本覆写回原文件。若对二进制 PDF/.docx 也回写，原件就被破坏成「扩展名是 .pdf 但内容是文本」，`read_document` 的 PDF 分支（fitz）随之失败。
+
+**修复**：`api/knowledge.py` 的 ingest 已加守卫——`target.suffix.lower() in _BINARY_DOC_EXT`（.pdf/.docx）时**跳过回写**，只把清洗文本存进向量库，原二进制文件保留。改 ingest 时不要去掉这个判断。
+
+## 37. PDF 读取报「未安装 PyMuPDF」
+
+**症状**：`read_document` 或 `/ingest` 读 PDF 返回「服务器未安装 PyMuPDF」。
+
+**根因**：`pymupdf` 没装进**应用实际运行的环境**（本项目是 conda `agent` 环境，不是 base）。`extract_text_from_file` 缺依赖时抛错，工具/ingest 转成友好提示。
+
+**修复**：`& E:\miniconda\envs\agent\python.exe -m pip install pymupdf`（已写进 `requirements.txt`）。`.docx` 用 `python-docx`（已装）。

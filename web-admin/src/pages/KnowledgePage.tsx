@@ -90,11 +90,33 @@ const KnowledgePage: React.FC = () => {
       ? params.separators.filter(x => x !== s)
       : [...params.separators, s])
 
+  const [uploadKind, setUploadKind] = useState<'normal' | 'policy'>('normal')
+
   const handleFiles = useCallback(async (fileList: FileList) => {
+    const allowed = ['.txt', '.md', '.rst', '.html', '.pdf', '.docx']
+
+    // 政策材料：走隔离暂存（kind=policy），不进知识库/不清洗；后续在「政策 Skill」页生成草稿
+    if (uploadKind === 'policy') {
+      for (const file of Array.from(fileList)) {
+        if (!allowed.some(ext => file.name.toLowerCase().endsWith(ext))) {
+          showToast(`仅支持 .txt .md .rst .html .pdf .docx，跳过：${file.name}`, 'error'); continue
+        }
+        try {
+          const fd = new FormData(); fd.append('file', file); fd.append('kind', 'policy')
+          const r = await fetch('/upload', { method: 'POST', body: fd })
+          const data = await r.json()
+          if (!r.ok || !data.ok) throw new Error(data.error || '上传失败')
+          showToast(`政策材料已暂存：${file.name} —— 去「政策 Skill」生成草稿`, 'success')
+        } catch (e) {
+          showToast(`上传失败：${file.name} - ${e instanceof Error ? e.message : ''}`, 'error')
+        }
+      }
+      return
+    }
+
     for (const file of Array.from(fileList)) {
-      const allowed = ['.txt', '.md', '.rst', '.html']
       if (!allowed.some(ext => file.name.toLowerCase().endsWith(ext))) {
-        showToast(`仅支持 .txt .md .rst .html，跳过：${file.name}`, 'error')
+        showToast(`仅支持 .txt .md .rst .html .pdf .docx，跳过：${file.name}`, 'error')
         continue
       }
       if (files.some(f => f.name === file.name)) {
@@ -161,7 +183,7 @@ const KnowledgePage: React.FC = () => {
         mError(msg)
       }
     }
-  }, [files, showToast])
+  }, [files, showToast, uploadKind])
 
   const handleDelete = async (name: string) => {
     const r = await fetch(`/files/${encodeURIComponent(name)}`, { method: 'DELETE' })
@@ -227,6 +249,20 @@ const KnowledgePage: React.FC = () => {
               <Upload size={16} className="text-[#3b82f6]" />
               <span className="text-sm font-semibold text-[#171717]">上传文件</span>
             </div>
+            {/* 资料类型：政策材料走隔离暂存，用于更新政策 skill */}
+            <div className="flex gap-1 mb-3 p-0.5 bg-[#f3f4f6] rounded-lg w-fit text-xs">
+              {(['normal', 'policy'] as const).map(k => (
+                <button key={k} onClick={() => setUploadKind(k)}
+                  className={`px-3 py-1.5 rounded-md transition-colors ${uploadKind === k ? 'bg-white text-[#3b82f6] shadow-sm font-medium' : 'text-[#6b6b6b]'}`}>
+                  {k === 'normal' ? '普通资料' : '政策材料'}
+                </button>
+              ))}
+            </div>
+            {uploadKind === 'policy' && (
+              <p className="text-[11px] text-amber-600 mb-2 leading-relaxed">
+                政策材料进入<b>隔离暂存</b>（不进知识库、正常对话检索不到），在「政策 Skill」页生成/更新政策 skill 草稿，人工审核后发布。
+              </p>
+            )}
             <div
               onDragOver={e => { e.preventDefault(); setDragging(true) }}
               onDragLeave={() => setDragging(false)}
@@ -237,9 +273,9 @@ const KnowledgePage: React.FC = () => {
             >
               <Upload size={28} className={dragging ? 'text-[#3b82f6]' : 'text-[#9ca3af]'} />
               <p className="text-sm text-[#6b6b6b]">拖拽到此处，或 <span className="text-[#3b82f6] font-medium">点击选择</span></p>
-              <p className="text-xs text-[#9ca3af]">.txt .md .rst .html（最大 50 MB）</p>
+              <p className="text-xs text-[#9ca3af]">.txt .md .rst .html .pdf .docx（最大 50 MB）</p>
             </div>
-            <input ref={fileInputRef} type="file" multiple accept=".txt,.md,.rst,.html"
+            <input ref={fileInputRef} type="file" multiple accept=".txt,.md,.rst,.html,.pdf,.docx"
               className="hidden" onChange={e => e.target.files && handleFiles(e.target.files)} />
           </div>
 

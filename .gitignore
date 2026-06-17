@@ -20,6 +20,11 @@ agent_service/lark_conversations/
 # Tool-generated downloadable artifacts (docx etc.)
 agent_service/downloads/
 
+# 政策 skill 更新流的运行时数据（暂存材料 / 待审草稿 / 发布前备份）
+agent_service/policy_staging/
+agent_service/policy_skill_drafts/
+agent_service/skill_backups/
+
 # Knowledge base docs (may contain proprietary content)
 agent_service/docs/
 agent_service/wiki/

@@ -45,10 +45,17 @@ bp = Blueprint("conversations", __name__)
 
 
 # ── 压缩相关常量 ─────────────────────────────────────────────────────────────
-MAX_CONTEXT_TOKENS = 32000
+MAX_CONTEXT_TOKENS = 1_000_000   # L3 预算（模型上下文 1M）；活跃区 token 超 80% 自动压缩
 COMPACT_THRESHOLD = 0.80
-LEVEL1_KEEP_TAIL_PAIRS = 4
-LEVEL2_KEEP_TAIL_PAIRS = 2
+TOOL_STORE_MAX = 4000   # 工具结果落盘截断上限（控存储/回放体积；Phase 0 工具轮持久化）
+# 发送态裁剪（Phase 1/2，不动存储，UI 仍可见全部）
+SEND_WINDOW_TURNS = 20        # L1：每次最多发最近 N 轮（以 user 消息为轮边界）；摘要恒前置
+TOOL_KEEP_RECENT_TURNS = 10   # L2：窗口内仅最近 M 轮保留工具消息，更早的工具消息剪掉
+# L3 滚动摘要：手动 compact 与自动阈值压缩统一为 L3，保留尾部按"轮"且对齐发送窗口
+L3_KEEP_TAIL_TURNS = SEND_WINDOW_TURNS   # 保留最近 N 轮原文，更早的折进 summary（=窗口，发送/存储一致）
+# L4 熔断：自动 L3 累计达 CIRCUIT_BREAK_AFTER 次时，本次改为全局强压（keep_tail=0 全折进摘要）并清零计数
+CIRCUIT_BREAK_AFTER = 3
+L4_KEEP_TAIL_TURNS = 0
 
 COMPACT_SYSTEM = (
     "你是对话历史压缩助手。请把下方对话整理为简明扼要的事实摘要：\n"
@@ -160,13 +167,34 @@ def make_title_from_msg(text: str) -> str:
 
 # ── 业务函数（供 agent.py 调用，需显式传入 user_id）────────────────────────
 
-def append_turn(cid: str, user_id: int, user_text: str, assistant_text: str) -> Optional[Dict]:
-    """追加一轮对话（user + assistant）。返回更新后的 conv 或 None。"""
+def append_turn(
+    cid: str,
+    user_id: int,
+    user_text: str,
+    assistant_text: str,
+    tool_items: Optional[List[Dict]] = None,
+) -> Optional[Dict]:
+    """追加一轮对话（user +（可选）工具消息 + assistant）。返回更新后的 conv 或 None。
+
+    tool_items: [{"name", "args", "result"}, ...]，来自 call_tools_node。
+                工具结果按 TOOL_STORE_MAX 截断后，以 role=tool 消息持久化进历史（Phase 0）。
+    """
     conv = load_conversation(cid, user_id)
     if conv is None:
         return None
     ts = _now()
     conv["messages"].append({"role": "user", "content": user_text, "ts": ts})
+    for it in (tool_items or []):
+        content = str(it.get("result") or "")
+        if len(content) > TOOL_STORE_MAX:
+            content = content[:TOOL_STORE_MAX] + f"\n…（工具结果过长，已截断，原 {len(content)} 字）"
+        conv["messages"].append({
+            "role": "tool",
+            "name": it.get("name") or "",
+            "args": it.get("args") or {},
+            "content": content,
+            "ts": ts,
+        })
     conv["messages"].append({"role": "assistant", "content": assistant_text, "ts": ts})
     conv["updated_at"] = ts
     if conv.get("title") in (None, "", _DEFAULT_TITLE):
@@ -188,17 +216,60 @@ def get_history(cid: str, user_id: int) -> List[Dict[str, str]]:
         history.append({"role": "system", "content": f"[历史摘要]\n{summary}"})
     compact_at = int(conv.get("compact_at", 0) or 0)
     for m in conv.get("messages", [])[compact_at:]:
-        history.append({"role": m["role"], "content": m["content"]})
+        role = m.get("role", "user")
+        if role == "tool":
+            history.append({"role": "tool", "name": m.get("name", ""), "content": m.get("content", "")})
+        else:
+            history.append({"role": role, "content": m.get("content", "")})
     return history
 
 
-# ── token 估算 ────────────────────────────────────────────────────────────────
+def window_history(
+    history: List[Dict],
+    window_turns: int = SEND_WINDOW_TURNS,
+    tool_keep_turns: int = TOOL_KEEP_RECENT_TURNS,
+) -> List[Dict]:
+    """发送态裁剪（Phase 1 L1 窗口 + Phase 2 L2 工具裁剪）。
+
+    输入 `history` 为 `get_history()` 的完整活跃区（含可能的前置 system 摘要）。
+    本函数**不改存储**，只决定"这一轮真正发给模型的消息"：
+      L1：以 user 消息为轮边界，仅保留最近 `window_turns` 轮；前置 system 摘要恒保留。
+      L2：在窗口内，距今超过 `tool_keep_turns` 轮的 `role=tool` 消息剪掉（仅留 user/assistant）。
+
+    轮边界定义：每条 user 消息开启一轮，其后的 tool/assistant 消息属于该轮。
+    """
+    if not history:
+        return history
+
+    # 前置 system 摘要（get_history 恒放最前）始终保留，不计入窗口轮数
+    head: List[Dict] = []
+    body = history
+    if history[0].get("role") == "system":
+        head = [history[0]]
+        body = history[1:]
+
+    # 轮起点 = 各 user 消息在 body 中的下标
+    user_pos = [i for i, m in enumerate(body) if m.get("role") == "user"]
+
+    # L1：只留最近 window_turns 轮
+    if len(user_pos) > window_turns:
+        start = user_pos[len(user_pos) - window_turns]
+        body = body[start:]
+        user_pos = [p - start for p in user_pos[len(user_pos) - window_turns:]]
+
+    # L2：窗口内距今 > tool_keep_turns 轮的工具消息剪掉
+    tool_cutoff = user_pos[len(user_pos) - tool_keep_turns] if len(user_pos) > tool_keep_turns else 0
+    trimmed = [m for i, m in enumerate(body) if not (m.get("role") == "tool" and i < tool_cutoff)]
+
+    return head + trimmed
+
+
+# ── token 估算（Phase 3：委托到官方 DeepSeek 分词器，不可用时内部降级粗估）──────
 def estimate_tokens(text: str) -> int:
     if not text:
         return 0
-    cjk = sum(1 for c in text if "一" <= c <= "鿿")
-    non_cjk = len(text) - cjk
-    return cjk + int(non_cjk * 0.75) + 4
+    from agent_service.token_counter import count_tokens
+    return count_tokens(text)
 
 
 def estimate_history_tokens(history: List[Dict[str, str]]) -> int:
@@ -211,18 +282,41 @@ def _format_for_compaction(prior_summary: str, messages: List[Dict]) -> str:
     if prior_summary:
         parts.append(f"[历史摘要]\n{prior_summary}\n")
     for m in messages:
-        role = "用户" if m.get("role") == "user" else "助手"
-        parts.append(f"{role}：{m.get('content','')}")
+        role = m.get("role")
+        if role == "user":
+            parts.append(f"用户：{m.get('content','')}")
+        elif role == "tool":
+            parts.append(f"工具[{m.get('name','')}]：{m.get('content','')}")
+        else:
+            parts.append(f"助手：{m.get('content','')}")
     return "\n".join(parts)
+
+
+def _tail_start_by_turns(messages: List[Dict], keep_tail_turns: int) -> int:
+    """返回"保留最近 keep_tail_turns 轮"的起点下标（轮 = 以 user 消息为边界）。
+
+    - keep_tail_turns <= 0  → len(messages)（活跃区全部可压；供 L4 熔断用）
+    - 总轮数 <= keep_tail_turns → 0（没有超出保留窗口的内容）
+    - 否则 → 倒数第 keep_tail_turns 个 user 消息的下标
+    工具消息计入对应轮，不单独成轮，故按 user 边界切分对工具持久化天然兼容。
+    """
+    if keep_tail_turns <= 0:
+        return len(messages)
+    user_idx = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+    if len(user_idx) <= keep_tail_turns:
+        return 0
+    return user_idx[len(user_idx) - keep_tail_turns]
 
 
 def compact_conversation(
     cid: str,
     user_id: int,
     cleaner_cfg: Dict[str, str],
-    keep_tail_pairs: int,
+    keep_tail_turns: int,
 ) -> Dict:
-    """对单个会话执行压缩。
+    """对单个会话执行 L3 压缩：把"超出最近 keep_tail_turns 轮"的内容折进 summary。
+
+    keep_tail_turns 按**轮**（user 边界）计；=0 时压缩全部活跃区（L4 熔断）。
 
     返回：
       {"ok": True, "summary": str, "compacted_count": int, "kept_count": int}
@@ -237,8 +331,7 @@ def compact_conversation(
     compact_at = int(conv.get("compact_at", 0) or 0)
     prior_summary = (conv.get("summary") or "").strip()
 
-    tail_size = keep_tail_pairs * 2
-    tail_start = max(0, len(messages) - tail_size)
+    tail_start = _tail_start_by_turns(messages, keep_tail_turns)
 
     if tail_start <= compact_at:
         return {"unchanged": True, "reason": "对话过短，无需压缩"}
@@ -436,7 +529,7 @@ def delete_conversation(cid: str):
 
 @bp.route("/conversations/<cid>/compact", methods=["POST"])
 def compact_endpoint(cid: str):
-    """手动触发一级压缩；keep_tail_pairs 可在 body 中覆盖。"""
+    """手动触发 L3 压缩；keep_tail_turns 可在 body 中覆盖（按轮）。"""
     from . import services  # 延迟导入，避免循环依赖
 
     uid = _current_user_id()
@@ -451,9 +544,9 @@ def compact_endpoint(cid: str):
 
     owner_id = int(conv.get("user_id") or uid)
     data = request.get_json(silent=True) or {}
-    keep = int(data.get("keep_tail_pairs", LEVEL1_KEEP_TAIL_PAIRS))
+    keep = int(data.get("keep_tail_turns", L3_KEEP_TAIL_TURNS))
     cleaner_cfg = services.load_cleaner_settings()
-    result = compact_conversation(cid, owner_id, cleaner_cfg, keep_tail_pairs=keep)
+    result = compact_conversation(cid, owner_id, cleaner_cfg, keep_tail_turns=keep)
     if "error" in result:
         return jsonify({"error": result["error"]}), 400
     return jsonify(result)

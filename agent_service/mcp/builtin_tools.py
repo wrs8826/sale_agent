@@ -8,7 +8,68 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from langchain_core.tools import tool
+
+# ── 文档文本提取（工具与 /ingest 共用的单一实现） ──────────────────────────────
+
+# 可直接按 UTF-8 读取的纯文本扩展名
+_TEXT_EXTS = {".txt", ".md", ".rst", ".html", ".htm", ".csv", ".log", ".json"}
+
+
+def extract_text_from_file(path: Path) -> str:
+    """按扩展名从文件中提取纯文本，供 read_document 工具与 /ingest 清洗共用。
+
+    支持：
+        .pdf            → PyMuPDF 逐页提取
+        .docx           → python-docx 提取段落 + 表格单元格
+        纯文本类         → UTF-8 读取（errors="ignore"）
+    不支持 .doc（旧二进制 Word）；缺少依赖或解析失败时抛出异常，由调用方决定如何呈现。
+
+    Args:
+        path: 目标文件的绝对路径（Path 对象）。
+
+    Returns:
+        提取出的纯文本（已 strip），不做长度截断。
+    """
+    ext = path.suffix.lower()
+
+    if ext == ".pdf":
+        try:
+            import fitz  # PyMuPDF
+        except ImportError as exc:
+            raise RuntimeError(
+                "服务器未安装 PyMuPDF，无法读取 PDF，请先 pip install pymupdf。"
+            ) from exc
+        parts = []
+        with fitz.open(str(path)) as doc:
+            for page in doc:
+                parts.append(page.get_text())
+        return "\n".join(parts).strip()
+
+    if ext == ".docx":
+        try:
+            from docx import Document
+        except ImportError as exc:
+            raise RuntimeError(
+                "服务器未安装 python-docx，无法读取 Word，请先 pip install python-docx。"
+            ) from exc
+        doc = Document(str(path))
+        parts = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [c.text.strip() for c in row.cells]
+                if any(cells):
+                    parts.append(" | ".join(cells))
+        return "\n".join(parts).strip()
+
+    if ext == ".doc":
+        raise RuntimeError("暂不支持旧版 .doc 二进制格式，请另存为 .docx 或 PDF 后再上传。")
+
+    # 其余按纯文本读取
+    return path.read_text(encoding="utf-8", errors="ignore").strip()
+
 
 # ── 工具定义 ──────────────────────────────────────────────────────────────────
 
@@ -230,19 +291,92 @@ def generate_word_document(title: str, sections: list, filename: str = "") -> st
     )
 
 
-# ── 工具列表（QA 图 call_tools_node 使用） ────────────────────────────────────
+_READ_MAX_CHARS = 16000  # read_document 注入提示词的文本上限，超出截断
+
+
+@tool
+def list_documents() -> str:
+    """列出知识库（docs）中当前可读取的所有文件名。
+
+    适用场景：用户想知道知识库里有哪些文件，或在调用 read_document 读取整篇内容
+    之前需要先确认准确文件名时调用。
+
+    Returns:
+        文件名列表字符串；知识库为空时给出提示。
+    """
+    from agent_service import DOCS_DIR
+
+    if not DOCS_DIR.exists():
+        return "知识库目录不存在。"
+    files = sorted(f.name for f in DOCS_DIR.iterdir() if f.is_file())
+    if not files:
+        return "知识库当前为空。"
+    return "知识库中的文件：\n" + "\n".join(f"- {n}" for n in files)
+
+
+@tool
+def read_document(filename: str) -> str:
+    """读取知识库中某个文件的完整文本内容，支持 PDF / Word(.docx) / 纯文本文件。
+
+    适用场景：用户要求阅读 / 总结 / 提取 / 针对某个【具体文件】问答，且需要的是
+    整篇原文而非知识库检索片段时调用。文件名不确定时先调用 list_documents 确认。
+
+    Args:
+        filename: 文件名（含扩展名），例如 "合同.pdf"、"产品手册.docx"。
+                  仅传文件名，不要带路径前缀。
+
+    Returns:
+        文件正文文本（过长时截断并附说明）；文件不存在时返回可用文件列表。
+    """
+    from agent_service import DOCS_DIR
+
+    name = Path(filename).name  # 仅取文件名，防目录穿越
+    target = DOCS_DIR / name
+    if not target.is_file():
+        available = (
+            sorted(f.name for f in DOCS_DIR.iterdir() if f.is_file())
+            if DOCS_DIR.exists() else []
+        )
+        if available:
+            return f"文件 {name!r} 不存在。知识库中可用文件：{available}"
+        return f"文件 {name!r} 不存在，且知识库为空。"
+
+    try:
+        text = extract_text_from_file(target)
+    except Exception as exc:
+        return f"读取文件失败：{exc}"
+
+    if not text:
+        return f"文件 {name!r} 未提取到文本内容（可能是扫描版 PDF 或空文件）。"
+
+    if len(text) > _READ_MAX_CHARS:
+        total = len(text)
+        text = text[:_READ_MAX_CHARS] + (
+            f"\n\n……（内容过长，仅展示前 {_READ_MAX_CHARS} 字，全文共 {total} 字）"
+        )
+    return f"【{name} 全文】\n{text}"
+
+
+# ── 工具列表 ──────────────────────────────────────────────────────────────────
+# BUILTIN_TOOLS：核心工具，网页端与飞书 QA 降级路径共用（飞书暂不含文档读取）。
+# WEB_TOOLS：在核心基础上追加文档读取工具，仅用户端 / 管理员端（api/agent.py）启用。
 BUILTIN_TOOLS = [get_current_time, load_policy_file, generate_word_document]
+WEB_TOOLS = BUILTIN_TOOLS + [read_document, list_documents]
 
 
-def build_tool_table() -> str:
-    """生成内置工具清单（Markdown 表格），供系统提示词常驻注入。
+def build_tool_table(tools=None) -> str:
+    """生成工具清单（Markdown 表格），供系统提示词常驻注入。
 
     取每个工具 docstring 的首行作为用途摘要；无工具时返回空串。
+
+    Args:
+        tools: 要展示的工具列表；缺省用 BUILTIN_TOOLS（核心集）。网页端应传入 WEB_TOOLS。
     """
-    if not BUILTIN_TOOLS:
+    tools = tools if tools is not None else BUILTIN_TOOLS
+    if not tools:
         return ""
     lines = ["| 工具 | 用途 |", "|---|---|"]
-    for t in BUILTIN_TOOLS:
+    for t in tools:
         desc = (t.description or "").strip()
         first = desc.splitlines()[0].strip() if desc else ""
         first = first.replace("|", "｜")  # 防止破坏表格

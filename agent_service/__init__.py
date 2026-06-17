@@ -19,6 +19,15 @@ LARK_TOKENS_DIR = PACKAGE_ROOT / "lark_tokens"
 SKILLS_ROOT = PROJECT_ROOT / "skills"
 DOWNLOADS_DIR = PACKAGE_ROOT / "downloads"  # 工具生成的可下载产物（docx 等）
 
+# 政策 skill 更新流（管理员专用，与正常 RAG/检索隔离）
+POLICY_STAGING_DIR = PACKAGE_ROOT / "policy_staging"        # 上传的政策材料暂存（不进 DOCS_DIR/向量库）
+POLICY_DRAFTS_DIR = PACKAGE_ROOT / "policy_skill_drafts"    # agent 生成的待审核草稿
+SKILL_BACKUPS_DIR = PACKAGE_ROOT / "skill_backups"          # 发布前对被覆盖的 skill 文件做备份
+
+POLICY_SKILL_MAKER = PROJECT_ROOT / "policy_skill_maker" / "SKILL.md"  # 草稿生成所用方法论（开发态 meta-skill）
+
+TOKEN_DIR = PROJECT_ROOT / "token"  # 官方 DeepSeek 分词器目录（tokenizer.json 等），用于精确 token 计数
+
 __all__ = [
     "PACKAGE_ROOT",
     "PROJECT_ROOT",
@@ -31,4 +40,9 @@ __all__ = [
     "LARK_TOKENS_DIR",
     "SKILLS_ROOT",
     "DOWNLOADS_DIR",
+    "POLICY_STAGING_DIR",
+    "POLICY_DRAFTS_DIR",
+    "SKILL_BACKUPS_DIR",
+    "POLICY_SKILL_MAKER",
+    "TOKEN_DIR",
 ]

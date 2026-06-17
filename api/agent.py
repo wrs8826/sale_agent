@@ -36,17 +36,12 @@ _FEEDBACK_SYSTEM = (
 )
 
 
-def _compact_response(conversation_id: str, user_id: int, level: int) -> Response:
-    """SSE 包装：跑一次压缩并通过 compact_done 事件回报结果。
+def _compact_response(conversation_id: str, user_id: int) -> Response:
+    """SSE 包装：跑一次 L3 手动压缩（compact 命令），compact_done 事件回报结果。
 
-    level=1 → keep_tail=LEVEL1_KEEP_TAIL_PAIRS（手动）
-    level=2 → keep_tail=LEVEL2_KEEP_TAIL_PAIRS（自动，目前由内联逻辑直接调用）
+    L3 保留尾部按"轮"且对齐发送窗口（conv_store.L3_KEEP_TAIL_TURNS）；手动与自动同为 L3，
+    仅触发方式不同。会话短于保留窗口时返回 unchanged。
     """
-    keep = (
-        conv_store.LEVEL1_KEEP_TAIL_PAIRS
-        if level == 1 else conv_store.LEVEL2_KEEP_TAIL_PAIRS
-    )
-
     def gen():
         try:
             yield f"data: {json.dumps({'type':'status','message':'正在压缩对话历史…'}, ensure_ascii=False)}\n\n"
@@ -54,15 +49,18 @@ def _compact_response(conversation_id: str, user_id: int, level: int) -> Respons
             if not cleaner_cfg["api_key"]:
                 yield f"data: {json.dumps({'type':'error','message':'未配置 API Key'}, ensure_ascii=False)}\n\n"
                 return
-            res = conv_store.compact_conversation(conversation_id, user_id, cleaner_cfg, keep_tail_pairs=keep)
+            res = conv_store.compact_conversation(
+                conversation_id, user_id, cleaner_cfg,
+                keep_tail_turns=conv_store.L3_KEEP_TAIL_TURNS,
+            )
             if res.get("unchanged"):
-                payload = {"type": "compact_done", "level": level, "unchanged": True, "reason": res.get("reason", "")}
+                payload = {"type": "compact_done", "level": 3, "unchanged": True, "reason": res.get("reason", "")}
             elif res.get("error"):
                 payload = {"type": "error", "message": res["error"]}
             else:
                 payload = {
                     "type": "compact_done",
-                    "level": level,
+                    "level": 3,
                     "compacted_count": res["compacted_count"],
                     "kept_count": res["kept_count"],
                     "summary_preview": (res["summary"] or "")[:200],
@@ -107,7 +105,7 @@ def agent_chat():
         if conv is None:
             return jsonify({"error": "会话不存在或已被删除"}), 404
         owner_id = int(conv.get("user_id") or user_id)
-        return _compact_response(conversation_id, owner_id, level=1)
+        return _compact_response(conversation_id, owner_id)
 
     # conversation_id 提供时，以服务端持久化的历史为准（多会话隔离的关键）
     if conversation_id and user_id is not None:
@@ -170,8 +168,9 @@ def agent_chat():
 
     use_rag = rag is not None
 
+    agent_mode = services.get_agent_mode()    # feature flag：react 多步循环 / single 单趟
     try:
-        graph = build_qa_graph()
+        graph = build_qa_graph(agent_mode)
     except Exception as e:
         return jsonify({"error": f"QA 图初始化失败: {e}"}), 500
 
@@ -185,6 +184,9 @@ def agent_chat():
         "score_threshold": services.load_rag_threshold(),
         "skill_system_prompt": skill.system_prompt if skill else None,
         "skill_table": build_skill_table(),   # L1 常驻注入
+        "web_tools": True,                    # 启用网页端专属工具（文档读取）；飞书路径不带此标志
+        "agent_mode": agent_mode,
+        "max_tool_rounds": 5,                 # react 模式最大工具调用轮数
     }
 
     def generate():
@@ -195,34 +197,54 @@ def agent_chat():
             threshold = int(conv_store.MAX_CONTEXT_TOKENS * conv_store.COMPACT_THRESHOLD)
             tokens = conv_store.estimate_history_tokens(state["history"]) + conv_store.estimate_tokens(message)
             if tokens > threshold:
+                # L4 熔断：本次若是第 CIRCUIT_BREAK_AFTER 次自动压缩，则改为全局强压（keep_tail=0）
+                prior = conv_stats.get_compact_count(owner_id, conversation_id)
+                is_circuit = (prior + 1) >= conv_store.CIRCUIT_BREAK_AFTER
+                stage = "熔断·全局强制压缩" if is_circuit else "自动压缩"
                 yield (
                     "data: " + json.dumps({
                         "type": "status",
-                        "message": f"对话历史约 {tokens} tokens，超过 {int(conv_store.COMPACT_THRESHOLD*100)}% 阈值，正在自动压缩…",
+                        "message": f"对话历史约 {tokens} tokens，超过 {int(conv_store.COMPACT_THRESHOLD*100)}% 阈值，正在{stage}…",
                     }, ensure_ascii=False) + "\n\n"
                 )
                 cleaner_cfg = services.load_cleaner_settings()
+                keep = conv_store.L4_KEEP_TAIL_TURNS if is_circuit else conv_store.L3_KEEP_TAIL_TURNS
                 res = conv_store.compact_conversation(
-                    conversation_id, owner_id, cleaner_cfg,
-                    keep_tail_pairs=conv_store.LEVEL2_KEEP_TAIL_PAIRS,
+                    conversation_id, owner_id, cleaner_cfg, keep_tail_turns=keep,
                 )
                 if res.get("ok"):
                     new_history = conv_store.get_history(conversation_id, owner_id)
                     state["history"] = new_history
-                    # 写库：压缩次数 +1，并取回最新值随事件下发给前端
-                    total_count = conv_stats.increment_compact_count(owner_id, conversation_id)
-                    yield (
-                        "data: " + json.dumps({
-                            "type": "auto_compacted",
-                            "level": 2,
-                            "compacted_count": res["compacted_count"],
-                            "kept_count": res["kept_count"],
-                            "summary_preview": res["summary"][:200],
-                            "tokens_before": tokens,
-                            "tokens_after": conv_store.estimate_history_tokens(new_history) + conv_store.estimate_tokens(message),
-                            "total_compact_count": total_count,  # 累计压缩次数（供前端判断提示）
-                        }, ensure_ascii=False) + "\n\n"
-                    )
+                    tokens_after = conv_store.estimate_history_tokens(new_history) + conv_store.estimate_tokens(message)
+                    if is_circuit:
+                        # 熔断后持久化清零计数（DB 写，刷新/重启不丢）
+                        conv_stats.reset_compact_count(owner_id, conversation_id)
+                        yield (
+                            "data: " + json.dumps({
+                                "type": "circuit_break",
+                                "compacted_count": res["compacted_count"],
+                                "kept_count": res["kept_count"],
+                                "summary_preview": res["summary"][:200],
+                                "tokens_before": tokens,
+                                "tokens_after": tokens_after,
+                                "total_compact_count": 0,  # 已清零
+                            }, ensure_ascii=False) + "\n\n"
+                        )
+                    else:
+                        # 写库：压缩次数 +1，并取回最新值随事件下发给前端
+                        total_count = conv_stats.increment_compact_count(owner_id, conversation_id)
+                        yield (
+                            "data: " + json.dumps({
+                                "type": "auto_compacted",
+                                "level": 3,
+                                "compacted_count": res["compacted_count"],
+                                "kept_count": res["kept_count"],
+                                "summary_preview": res["summary"][:200],
+                                "tokens_before": tokens,
+                                "tokens_after": tokens_after,
+                                "total_compact_count": total_count,  # 累计压缩次数（供前端判断提示）
+                            }, ensure_ascii=False) + "\n\n"
+                        )
                 elif res.get("unchanged"):
                     pass  # 太短无法压缩，继续即可
                 else:
@@ -233,11 +255,20 @@ def agent_chat():
                         }, ensure_ascii=False) + "\n\n"
                     )
 
+        # 发送态裁剪（L1 窗口 + L2 工具裁剪）：在 token 估算/自动压缩之后、真正发模型之前
+        # 只影响"这一轮发什么"，不动存储；UI 仍从完整 messages[] 渲染
+        state["history"] = conv_store.window_history(state["history"])
+
+        tool_items_acc: list = []   # 本轮工具调用记录，用于持久化（Phase 0 工具轮持久化）
         try:
             for event in graph.stream(state, stream_mode="custom"):
                 # stream_mode="custom" 时 event 就是节点 writer 推出的 dict
-                if event.get("type") == "done":
+                etype = event.get("type")
+                if etype == "done":
                     full_text = event.get("full_text") or ""
+                elif etype == "tool_turn":
+                    tool_items_acc = event.get("items") or tool_items_acc
+                    continue  # 内部事件，不下发前端
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as exc:
             err = {"type": "error", "message": str(exc)}
@@ -247,7 +278,7 @@ def agent_chat():
         # 持久化：仅 conversation_id 有效且 done 拿到回复时落盘
         if conversation_id and owner_id is not None and full_text:
             try:
-                updated = conv_store.append_turn(conversation_id, owner_id, message, full_text)
+                updated = conv_store.append_turn(conversation_id, owner_id, message, full_text, tool_items_acc)
                 if updated is not None:
                     yield (
                         "data: "

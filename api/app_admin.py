@@ -28,6 +28,7 @@ from api.knowledge import bp as knowledge_bp
 from api.settings import bp as settings_bp
 from api.users import bp as users_bp
 from api.lark_agent import bp as lark_agent_bp
+from api.policy_skill import bp as policy_skill_bp
 from api.socketio_instance import socketio
 from agent_service.mcp.mcp_manager import mcp_manager
 from agent_service.mcp.lark_bot import lark_bot
@@ -54,6 +55,7 @@ def create_app() -> Flask:
     app.register_blueprint(settings_bp)
     app.register_blueprint(users_bp)
     app.register_blueprint(lark_agent_bp)
+    app.register_blueprint(policy_skill_bp)   # 政策 skill 更新（仅 admin 端注册）
 
     socketio.init_app(app)
     mcp_manager.start()

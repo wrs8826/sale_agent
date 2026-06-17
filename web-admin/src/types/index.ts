@@ -1,4 +1,4 @@
-export type Page = 'knowledge' | 'chat' | 'users' | 'settings'
+export type Page = 'knowledge' | 'chat' | 'users' | 'settings' | 'policy'
 
 export interface KnowledgeFile {
   name: string
@@ -9,10 +9,12 @@ export interface KnowledgeFile {
 
 export interface ChatMessage {
   id: string
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'tool'
   content: string
   streaming?: boolean
   sources?: string[]
+  name?: string                 // role=tool 时的工具名（Phase 0 工具轮持久化）
+  args?: Record<string, unknown>
 }
 
 export interface User {

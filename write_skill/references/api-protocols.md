@@ -20,8 +20,9 @@
 | `/users/<id>/settings` | POST | users | 保存用户专属模型配置（api_key 自动加密） |
 | `/users/<id>/settings/test` | POST | users | 用表单值测试四段连通性（不保存） |
 | `/files` | GET | knowledge | 列 docs/ 下文件 |
-| `/upload` | POST | knowledge | multipart 上传 |
+| `/upload` | POST | knowledge | multipart 上传（`ALLOWED_EXT`=.txt/.md/.rst/.html/.pdf/.docx；对话页回形针也复用此接口） |
 | `/files/<name>` | DELETE | knowledge | 删 docs/ 下文件 |
+| `/download/<file>` | GET | knowledge | 下载工具产物（DOWNLOADS_DIR，防目录穿越，**无 login_required，公开**） |
 | `/query` | POST | knowledge | RAG 检索调试（含分块参数） |
 | `/vectordb/clear` | POST | knowledge | 清空 chroma collection |
 | `/vectordb/rebuild` | POST | knowledge | **SSE** 用当前 embedding 配置重建向量库（embedding 变更后自动触发，也可手动） |
@@ -33,6 +34,14 @@
 | `/conversations` | GET / POST | conversations | 列表 / 新建 |
 | `/conversations/<id>` | GET / PATCH / DELETE | conversations | 取 / 改名 / 删 |
 | `/conversations/<id>/compact` | POST | conversations | 手动压缩 |
+| `/admin/policy-staging` | GET / DELETE | policy_skill | 列/删 政策材料暂存（**仅 admin 端注册 + admin 角色**） |
+| `/admin/policy-skill/draft` | POST | policy_skill | **SSE** 解析暂存政策文件 → 按 policy_skill_maker 生成 skill 草稿 |
+| `/admin/policy-skill/drafts` | GET | policy_skill | 列待审核草稿 |
+| `/admin/policy-skill/draft/<id>` | GET | policy_skill | 取草稿全文（审核用） |
+| `/admin/policy-skill/publish` | POST | policy_skill | 人工确认后落盘到 skills/（备份+热重载+删暂存/草稿） |
+| `/admin/policy-skill/discard` | POST | policy_skill | 丢弃草稿（保留暂存） |
+
+> **政策 skill 更新流隔离**：`policy_skill` 蓝图只在 `app_admin` 注册，每路由再校验 admin 角色。政策材料经 `/upload?kind=policy` 进 `POLICY_STAGING_DIR`（不进 RAG）；草稿生成复用清洗子图（system_prompt=`policy_skill_maker` body），agent 只产草稿不碰 live `skills/`；发布由后端落盘。正常用户对话（`/agent/chat`）完全接触不到这条流。
 
 ## SSE 事件协议（前端契约）
 
@@ -51,7 +60,8 @@
 | `warning` | `message` | 非致命警告（如自动压缩失败但继续） |
 | `conversation_saved` | `conversation_id, title, updated_at, message_count` | 持久化成功 |
 | `compact_done` | `level, compacted_count?, kept_count?, summary_preview?, unchanged?, reason?` | 手动 compact 命令的结果 |
-| `auto_compacted` | `level, compacted_count, kept_count, summary_preview, tokens_before, tokens_after` | 自动压缩完成 |
+| `auto_compacted` | `level(=3), compacted_count, kept_count, summary_preview, tokens_before, tokens_after, total_compact_count` | L3 自动压缩完成 |
+| `circuit_break` | `compacted_count, kept_count, summary_preview, tokens_before, tokens_after, total_compact_count(=0)` | L4 熔断：第 3 次自动压缩改为全局强压并持久化清零计数 |
 
 ### `/ingest`
 
@@ -172,14 +182,17 @@ role ≠ admin 时即使密码正确也返回 403。
 
 ### `POST /upload` (multipart)
 ```
-form-data: file=<.txt|.md|.rst|.html>
+form-data: file=<.txt|.md|.rst|.html|.pdf|.docx>, kind=normal|policy(可选,默认 normal)
 ```
-响应：`{ok: true, filename}`
+响应：`{ok: true, filename, kind}`。
+- `kind=normal`：落 `DOCS_DIR` 并 `invalidate_rag()`。对话页回形针上传复用此分支（文件入知识库后由 `read_document` 工具读取）。
+- `kind=policy`（**仅 admin**）：落 `POLICY_STAGING_DIR`，**不进 RAG**，供「政策 skill 更新」流解析。
 
 ### `POST /ingest`
 ```json
 { "filename": "must-exist-in-docs/" }
 ```
+读取走 `extract_text_from_file`（PDF/.docx 文本提取）；PDF/.docx 二进制原件清洗后**不回写**（保留原文供 `read_document` 读），纯文本仍回写。
 
 ### `POST /query`
 ```json
@@ -259,7 +272,7 @@ form-data: file=<.txt|.md|.rst|.html>
 需归属校验（普通用户只能删自己的）。
 
 ### `POST /conversations/<id>/compact`
-请求：`{keep_tail_pairs?: 4}`，响应：`{ok, summary, compacted_count, kept_count}` 或 `{unchanged, reason}` 或 `{error}`
+请求：`{keep_tail_turns?: 20}`（L3，按轮，缺省 `L3_KEEP_TAIL_TURNS`），响应：`{ok, summary, compacted_count, kept_count}` 或 `{unchanged, reason}` 或 `{error}`
 需归属校验（普通用户只能压缩自己的）。
 
 ## SSE 生成器写法（标准模板）

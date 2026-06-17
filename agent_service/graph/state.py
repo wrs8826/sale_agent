@@ -31,7 +31,10 @@ class ChatState(TypedDict, total=False):
     score_threshold: float      # 低于该分时忽略命中，改用会话上下文兜底
     skill_system_prompt: Optional[str]  # L2：skill 匹配时注入的系统提示
     skill_table: Optional[str]          # L1：所有 skill 的注册表（Markdown 表格），常驻注入
-    tool_results: Optional[str]         # call_tools_node 执行工具后的结果摘要
+    web_tools: bool                     # True 时启用网页端专属工具集（文档读取）；飞书路径不传，仅核心工具
+    agent_mode: str                     # 'react' 多步自主工具循环 / 'single' 单趟（默认）
+    max_tool_rounds: int                # react 模式最大工具调用轮数（默认 5）
+    tool_results: Optional[str]         # call_tools_node 执行工具后的结果摘要（single 模式用）
     # ── 节点产出 ────────────────────────────────────────────────────────────
     keywords: str               # extract 节点写
     hits: List[Dict[str, Any]]  # retrieve 节点写
