@@ -7,6 +7,7 @@
 - **RAG 问答**：混合检索（BM25 + 向量）+ 可选重排序，支持自定义知识库
 - **流式输出**：Server-Sent Events（SSE）逐 token 推送（`tool_start / tool_end / token / done / auto_compacted / circuit_break / conversation_saved` 等事件）
 - **多步工具循环（ReAct）**：`agent_mode` feature flag 灰度切换——`single`（单趟一次工具）/ `react`（`create_react_agent` 多步 思考→调工具→观察，默认最多 5 轮）；网页端与飞书降级共用
+- **先列方案再执行**：`enable_planning` 开关（仅 react 生效）——执行前先产出一份执行方案（任务拆分），以独立「📋 执行方案」卡片流式展示，并作为执行指令注入循环；仅网页端
 - **内置工具**：读取文档（PDF / Word / 文本，`read_document`）、列文件、查政策原文、生成 Word（返回下载链接）、获取时间；网页端独有文档读取，飞书侧不暴露
 - **文档读取与上传**：知识库支持 `.txt/.md/.rst/.html/.pdf/.docx`；对话框回形针可直接上传文件让助手读取
 - **四级对话压缩**：L1 滑动窗口（最近 20 轮）+ L2 工具记录裁剪 + L3 滚动摘要（DeepSeek 分词器精确计数，1M 上下文预算）+ L4 熔断全局强压；工具调用持久化进历史
@@ -166,6 +167,7 @@ Content-Type: application/json
 | `USER_SECRET_KEY` | 用户端 Session 密钥（生产务必覆盖） | `user-app-secret-key-change-in-prod` |
 | `ADMIN_SECRET_KEY` | 管理端 Session 密钥（生产务必覆盖） | `admin-app-secret-key-change-in-prod` |
 | `AGENT_MODE` | 对话循环模式：`react`（多步工具循环）/ `single`（单趟） | `single` |
+| `PLAN_FIRST` | 先列执行方案再执行（任务拆分，仅 react 生效）：`1`/`true`/`on` 开启 | `false` |
 | `DB_HOST` | MySQL 地址 | `127.0.0.1` |
 | `DB_PORT` | MySQL 端口 | `3306` |
 | `DB_USER` | MySQL 用户名 | `root` |
@@ -173,7 +175,7 @@ Content-Type: application/json
 | `DB_NAME` | 数据库名 | `sales_agent` |
 | `REDIS_PASSWORD` | Redis 密码（Session 存储） | — |
 
-> `AGENT_MODE` 也可写在 `config.yaml` 顶层 `agent_mode`；环境变量优先。生产前请覆盖两个 `*_SECRET_KEY`。
+> `AGENT_MODE` / `PLAN_FIRST` 也可写在 `config.yaml` 顶层（`agent_mode` / `enable_planning`）；环境变量优先。`PLAN_FIRST` 仅在 `AGENT_MODE=react` 时生效。生产前请覆盖两个 `*_SECRET_KEY`。
 
 ## 技术栈
 

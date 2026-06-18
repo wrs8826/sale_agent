@@ -34,10 +34,12 @@ class ChatState(TypedDict, total=False):
     web_tools: bool                     # True 时启用网页端专属工具集（文档读取）；飞书路径不传，仅核心工具
     agent_mode: str                     # 'react' 多步自主工具循环 / 'single' 单趟（默认）
     max_tool_rounds: int                # react 模式最大工具调用轮数（默认 5）
+    enable_planning: bool               # react 模式：执行前先产出执行方案（任务拆分），默认关
     tool_results: Optional[str]         # call_tools_node 执行工具后的结果摘要（single 模式用）
     # ── 节点产出 ────────────────────────────────────────────────────────────
     keywords: str               # extract 节点写
     hits: List[Dict[str, Any]]  # retrieve 节点写
+    plan: str                   # plan 节点写：执行方案（任务拆分）原文，注入 agent_react 作执行指令
     full_text: str              # generate 节点写
     # ── 错误 ────────────────────────────────────────────────────────────────
     error: Optional[str]

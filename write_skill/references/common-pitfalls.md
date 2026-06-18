@@ -378,3 +378,31 @@ params={"department_id": root, "department_id_type": "open_department_id", ...}
 **根因**：`pymupdf` 没装进**应用实际运行的环境**（本项目是 conda `agent` 环境，不是 base）。`extract_text_from_file` 缺依赖时抛错，工具/ingest 转成友好提示。
 
 **修复**：`& E:\miniconda\envs\agent\python.exe -m pip install pymupdf`（已写进 `requirements.txt`）。`.docx` 用 `python-docx`（已装）。
+
+## 38. 生成的 Word 下载链接打不开 / 下载不了
+
+**症状**：让 agent 生成文档，给出的链接点不开；或链接长成 `https://<host>/<uuid>`（无 `/download/`、无 `.docx`）；或经某公网入口访问时"连接关闭"。
+
+**四个独立根因（逐层排）**：
+1. **single 模式下工具没被可靠调用** → 文件根本没生成。单趟工具决策对"生成整篇文档"不稳。**切 `agent_mode=react`**（多步循环会真正调 `generate_word_document`）。验证：`agent_service/downloads/`（复数目录）是否出现 `.docx`。
+2. **依赖模型把 `/download/...docx` 链接写进回答 → 不可靠**：实测 DeepSeek 会把链接写错或**编造**成 `https://<部署域名>/<uuid>` 这种（无 `/download/`、无 `.docx`）。**已改为确定性下载**：`api/agent.py` 转发循环里对 `generate_word_document` 的 `tool_end` 用 `_extract_download()` 抽出真实 `/download/...`，下发 `download` 事件；两端据此渲染下载按钮（重载历史时从持久化的 `role=tool` 消息正则抽链接）；提示词也改成"不要自行编造下载链接，系统会显示按钮"。
+3. **工具轮上限吃满**：若某轮在 `max_tool_rounds` 步内还没轮到 `generate_word_document` 就到顶，这轮就没生成。`api/agent.py` 网页端已放宽到 15。注意：`download` 事件在工具执行完成那刻发出，**不受后续超时/超限影响**——只要工具真跑了按钮就在。
+4. **相对链接 `/download/...` 经入口未转发**：按钮 href 是相对路径，依赖访问入口把 `/download` 转给 Flask。`web-admin` 开发态需在 `vite.config.ts` 代理 `/download`（和 `/admin`，否则政策页也断）；外部隧道/平台可能根本不转发或掐断该路径。
+
+**定位方法（关键）**：本机直连 `http://localhost:5001/download/<file>` 与 `:5002/download/<file>`——若返回 200（含中文名，`Content-Disposition: filename*=UTF-8''...`），说明**应用层完全正常**，问题在外部入口/代理那层。`DOWNLOADS_DIR = agent_service/downloads`（PACKAGE_ROOT 下，绝对路径，与 cwd 无关）。
+
+**本地访问对称**：用户端 `http://localhost:5001`、管理端 `http://localhost:5002`（Flask `app_admin` 直接服务 `web-admin/dist/`）；局域网用 `<本机局域网IP>:<port>`（后端监听 `0.0.0.0`）。相对下载链接会自动指向当前访问地址，故本地访问即走本地下载、不经任何公网入口。
+
+## 39. `load_policy_file` 读不到 skill 的 `SKILL.md` / 带 `references/` 前缀扑空
+
+**症状**：工具调用 `load_policy_file(skill_name="甬江人才政策", filename="SKILL.md")` 返回「文件 'SKILL.md' 不存在」；或模型传 `filename="references/资金政策.md"` 也读不到。
+
+**根因**：旧实现只在 `SKILLS_ROOT/<skill>/references/<filename>` 下找。① `SKILL.md` 在 skill **根目录**不在 references/ → 读不到；② 文档地图里写的是带 `references/` 前缀的路径，模型照抄传进来 → 拼成 `references/references/...` → 扑空。模型之所以会去读 `SKILL.md`，是旧 docstring 写「已通过 SKILL.md 文档地图确定目标文件」，诱导它"先读 SKILL.md 拿地图"（其实地图在 detect_skill 命中后已注入 `skill_system_prompt`）。
+
+**修复**（`agent_service/mcp/builtin_tools.py: load_policy_file`）：
+- `safe = Path(filename).name` 取末段 → 自动剥掉 `references/` 前缀，同时防目录穿越；
+- 候选路径 `[<skill>/references/<safe>, <skill>/<safe>]` 依次找 → **支持读根目录 `SKILL.md`**；
+- 错误信息同时列出 references/ 和根目录的 `.md`；
+- docstring 改为「文档地图已在系统提示中，无需再读 SKILL.md」。
+
+**触发点**：`builtin_mcp_server.py` 从 `builtin_tools` 导入同一函数转发，飞书路径自动同享此修复。新增带 references 的 skill 无需改工具。

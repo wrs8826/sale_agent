@@ -10,6 +10,7 @@ from .nodes import (
     call_tools_node,
     extract_keywords_node,
     generate_node,
+    plan_node,
     retrieve_node,
 )
 
@@ -23,23 +24,27 @@ def build_qa_graph(agent_mode: str = "single"):
         call_tools 单趟一次工具调用，结果注入 generate。
 
     react（多步自主工具循环）：
-        START → extract_keywords ──┬─► retrieve → agent_react → END
-                                   └─► agent_react → END
-        先预检索作 grounding，再由 agent_react（create_react_agent）多步循环调工具后作答。
+        START → extract_keywords ──┬─► retrieve → plan → agent_react → END
+                                   └─► plan → agent_react → END
+        先预检索作 grounding，plan 节点按需先产出执行方案（任务拆分，enable_planning 时），
+        再由 agent_react（create_react_agent）按方案多步循环调工具后作答。
+        plan 节点自身按 state['enable_planning'] 门控：未启用时直接透传、不调 LLM。
     """
     g = StateGraph(ChatState)
     g.add_node("extract_keywords", extract_keywords_node)
     g.add_node("retrieve", retrieve_node)
 
     if agent_mode == "react":
+        g.add_node("plan", plan_node)
         g.add_node("agent_react", agent_react_node)
         g.add_edge(START, "extract_keywords")
         g.add_conditional_edges(
             "extract_keywords",
             after_extract,
-            {"retrieve": "retrieve", "generate": "agent_react"},
+            {"retrieve": "retrieve", "generate": "plan"},
         )
-        g.add_edge("retrieve", "agent_react")
+        g.add_edge("retrieve", "plan")
+        g.add_edge("plan", "agent_react")
         g.add_edge("agent_react", END)
     else:
         g.add_node("call_tools", call_tools_node)

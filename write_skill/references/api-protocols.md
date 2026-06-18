@@ -52,8 +52,12 @@
 | event.type | 字段 | 触发 |
 |---|---|---|
 | `status` | `message` | 通用状态文案，例如压缩进行中 |
-| `tool_start` | `name` | 节点开始（`提取关键词` / `检索知识库`） |
-| `tool_end` | `name, keywords?, count?` | 节点结束 |
+| `tool_start` | `name` | 节点/工具开始（`提取关键词` / `检索知识库` / 实际工具名）；前端据此在执行清单加 `[ ] name` |
+| `tool_end` | `name, keywords?, count?, result?, error?` | 节点/工具结束；前端把清单里对应项翻成 `[✅]`（无 `error`）或 `[❌]`（有 `error`）。react 工具失败时由 `agent_react_node` 按 `ToolMessage.status=='error'` 带上 `error` |
+| `plan_start` | —— | 规划开始（仅 react + `enable_planning`），前端建「📋 执行方案」卡片 |
+| `plan_token` | `text` | 执行方案的单个 token，**逐字追加渲染到方案卡片** |
+| `plan_end` | `plan, warning?` | 方案完成（卡片折叠）；`plan` 为空表示规划失败/跳过，前端撤掉卡片 |
+| `download` | `url, filename` | 生成可下载文件后下发（`generate_word_document`）。由 `api/agent.py` 从**真实工具结果**抽出 `/download/...docx`，前端据此渲染下载按钮——**不依赖模型把链接写进回答**（模型常把链接写错/编造） |
 | `token` | `text` | 单个 token，**逐字追加渲染** |
 | `done` | `full_text` | 生成完成，前端定型气泡 |
 | `error` | `message` | 任何阶段失败 |
@@ -62,6 +66,10 @@
 | `compact_done` | `level, compacted_count?, kept_count?, summary_preview?, unchanged?, reason?` | 手动 compact 命令的结果 |
 | `auto_compacted` | `level(=3), compacted_count, kept_count, summary_preview, tokens_before, tokens_after, total_compact_count` | L3 自动压缩完成 |
 | `circuit_break` | `compacted_count, kept_count, summary_preview, tokens_before, tokens_after, total_compact_count(=0)` | L4 熔断：第 3 次自动压缩改为全局强压并持久化清零计数 |
+
+> **内部事件 `tool_turn`**：节点推出后由 `api/agent.py` 的转发循环拦截（`continue`，不下发前端），仅用于把本轮工具调用持久化为会话历史里的 `role=tool` 消息。新增 SSE 类型若**不希望**下发前端，照此在转发循环里拦截；`plan_*` 不在拦截名单，会正常下发。
+
+> **下载链接的确定性下发**：转发循环里对 `tool_end` 且 `name == "generate_word_document"` 的事件，用 `_extract_download()`（正则 `/download/...docx`）从**工具结果原文**抽出 `{url, filename}`，先于该 `tool_end` 下发一个 `download` 事件。前端据此渲染下载按钮，**不依赖模型把链接写进回答**——实测 DeepSeek 会把下载链接写错/编造（如 `https://<host>/<uuid>`）。重载历史时，前端从持久化的 `role=tool`（`generate_word_document`）消息内容里同样正则抽链接渲染按钮。生成类工具的提示词也已改为「不要自行编造/改写下载链接，系统会显示下载按钮」。
 
 ### `/ingest`
 

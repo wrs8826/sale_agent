@@ -280,6 +280,20 @@ def get_agent_mode() -> str:
     return "react" if str(raw or "").strip().lower() == "react" else "single"
 
 
+def get_plan_first() -> bool:
+    """是否启用"先列执行方案再执行"（任务拆分，仅 react 模式生效）。
+
+    优先级：环境变量 PLAN_FIRST > config.yaml 顶层 enable_planning > False。
+    取值：'1'/'true'/'yes'/'on'（不区分大小写）视为开启。
+    灰度：改 env 或 config.yaml 即可切换。single 模式下此开关无意义（图里无 plan 节点）。
+    """
+    import os
+    raw = os.getenv("PLAN_FIRST")
+    if raw is None:
+        raw = _read_raw_yaml().get("enable_planning")
+    return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def get_api_key() -> Optional[str]:
     """向后兼容：返回 chat 段的明文 key（embedder / 旧调用方使用）。"""
     return load_chat_settings()["api_key"] or None

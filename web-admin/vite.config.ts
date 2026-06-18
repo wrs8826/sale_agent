@@ -22,6 +22,8 @@ export default defineConfig({
       '/settings':      { target: 'http://127.0.0.1:5002', changeOrigin: true },
       '/conversations': { target: 'http://127.0.0.1:5002', changeOrigin: true },
       '/lark':          { target: 'http://127.0.0.1:5002', changeOrigin: true },
+      '/download':      { target: 'http://127.0.0.1:5002', changeOrigin: true },
+      '/admin':         { target: 'http://127.0.0.1:5002', changeOrigin: true },
     }
   }
 })

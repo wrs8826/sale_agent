@@ -15,6 +15,9 @@ export interface ChatMessage {
   sources?: string[]
   name?: string                 // role=tool 时的工具名（Phase 0 工具轮持久化）
   args?: Record<string, unknown>
+  plan?: string                 // role=assistant 时的执行方案（先列方案再执行，仅当轮，不持久化）
+  download?: { url: string; filename: string }  // 由真实工具结果渲染的下载信息（generate_word_document）
+  tools?: { name: string; status: 'running' | 'ok' | 'error' }[]  // 工具执行实时清单（live，不持久化）
 }
 
 export interface User {

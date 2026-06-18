@@ -32,19 +32,21 @@ else:
 
 ```
 qa/
-├── prompts.py   # EXTRACT_SYSTEM, build_generate_system()
-├── nodes.py     # call_tools_node, extract_keywords_node, retrieve_node, generate_node, agent_react_node
+├── prompts.py   # EXTRACT_SYSTEM, PLAN_SYSTEM, PLAN_INJECT_PREFIX, build_generate_system()
+├── nodes.py     # call_tools_node, extract_keywords_node, retrieve_node, generate_node, plan_node, agent_react_node
 ├── edges.py     # after_extract (rag_fn None → skip retrieve)
 └── build.py     # build_qa_graph(agent_mode)
 ```
 
 图流程（由 feature flag `agent_mode` 决定，`build_qa_graph(agent_mode)`）：
 - **single**（默认）：`START → call_tools → extract_keywords → retrieve? → generate → END`
-- **react**：`START → extract_keywords → retrieve? → agent_react → END`（`agent_react_node` 用 `create_react_agent` 多步自主工具循环，预检索作 grounding，`max_tool_rounds=5`，`astream_events(v2)` 映射回 SSE）
+- **react**：`START → extract_keywords → retrieve? → plan → agent_react → END`（`agent_react_node` 用 `create_react_agent` 多步自主工具循环，预检索作 grounding，`max_tool_rounds`（`api/agent.py` 网页端传 15；节点默认 5），`astream_events(v2)` 映射回 SSE）
+
+**plan 节点（先列方案再执行）**：仅 react 形态含 `plan` 节点，位于 retrieve 与 agent_react 之间。它**自身按 `state['enable_planning']` 门控**——未启用时直接 `return {"plan": ""}`、不调 LLM、不推事件；启用时单次 LLM 调用产出一份执行方案（任务拆分），流式推 `plan_start`/`plan_token`/`plan_end`，方案全文写入 `state['plan']`。`agent_react_node` 把 `state['plan']` 经 `PLAN_INJECT_PREFIX` 追加到 system prompt 末尾作执行指令。**方案不写入持久化历史**（仅当轮指令，不污染压缩预算）。开关：`services.get_plan_first()`（env `PLAN_FIRST` > config.yaml 顶层 `enable_planning` > False），与 `agent_mode` 正交；仅 react 生效，single 图无 plan 节点。飞书路径不传 `enable_planning`（默认 False），故不列方案。
 
 切换：`services.get_agent_mode()`（env `AGENT_MODE` > config.yaml 顶层 `agent_mode` > `single`）。网页端 `api/agent.py` 与飞书降级 `lark_bot._query()` 都按此 flag 编译图。
 
-state：`ChatState{query, history, chat_cfg, rag_fn, top_k, score_threshold, skill_system_prompt, skill_table, web_tools, agent_mode, max_tool_rounds, keywords, hits, tool_results, full_text, error}`
+state：`ChatState{query, history, chat_cfg, rag_fn, top_k, score_threshold, skill_system_prompt, skill_table, web_tools, agent_mode, max_tool_rounds, enable_planning, tool_results, keywords, hits, plan, full_text, error}`
 
 **调用方式（流式 stream）**：
 ```python
@@ -162,6 +164,10 @@ def extract_keywords_node(state):
    ```
 
 **`load_policy_file` 的特殊约定**：只有在 `skill_system_prompt` 里存在文档地图时模型才会调用它。文档地图必须包含 `skill_name`（等于 skill 目录名）和 `filename`（含 `.md` 后缀）。
+
+- 路径解析：先 `SKILLS_ROOT/<skill>/references/<file>`，再回退 `SKILLS_ROOT/<skill>/<file>`（**支持读 skill 根目录的 `SKILL.md`**）。
+- `filename` 会先 `Path(filename).name` 取末段——既**自动剥掉 `references/` 前缀**（文档地图里常带），又防目录穿越。
+- docstring 已明确「文档地图已在系统提示中，无需再读 SKILL.md」，避免模型为拿地图而去 `load_policy_file("SKILL.md")` 扑空（详见 common-pitfalls #39）。
 
 ## 节点写作约定
 

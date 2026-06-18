@@ -11,7 +11,12 @@ from langchain_openai import ChatOpenAI
 from langgraph.config import get_stream_writer
 
 from ..state import ChatState
-from .prompts import EXTRACT_SYSTEM, build_generate_system
+from .prompts import (
+    EXTRACT_SYSTEM,
+    PLAN_INJECT_PREFIX,
+    PLAN_SYSTEM,
+    build_generate_system,
+)
 
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
@@ -261,6 +266,54 @@ def _forced_answer(writer, llm, system_prompt: str, history_msgs: List, query: s
     return "".join(parts)
 
 
+def plan_node(state: ChatState) -> ChatState:
+    """规划节点（仅 react + enable_planning）：执行前先产出一份执行方案（任务拆分）。
+
+    - 单次 LLM 调用，输入=用户问题 + 预检索片段 + skill 表 + 工具表。
+    - 流式推 plan_start / plan_token / plan_end，前端渲染成独立「执行方案」卡片。
+    - 方案全文写入 state['plan']，由 agent_react_node 注入 system prompt 作执行指令。
+    - 方案不写入持久化历史（仅当轮指令），不抛异常：失败则 plan 留空，react 照常执行。
+    """
+    writer = get_stream_writer()
+
+    if not state.get("enable_planning"):
+        return {"plan": ""}
+
+    from agent_service.mcp.builtin_tools import build_tool_table, BUILTIN_TOOLS, WEB_TOOLS
+
+    tools = WEB_TOOLS if state.get("web_tools") else BUILTIN_TOOLS
+    hits = state.get("hits") or []
+    threshold = state.get("score_threshold") or 0.3
+    has_hits = _hits_above_threshold(hits, threshold)
+
+    system_prompt = PLAN_SYSTEM.format(
+        skill_table=(state.get("skill_table") or "").strip() or "（暂无已加载的知识领域）",
+        tool_table=build_tool_table(tools) or "（暂无可用工具）",
+        context=_format_context(hits) if has_hits else "（暂无相关片段）",
+    )
+
+    writer({"type": "plan_start"})
+    plan_text = ""
+    try:
+        llm = _build_llm(state["chat_cfg"])
+        msgs = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"用户问题：{state['query']}\n\n请给出执行方案："),
+        ]
+        for chunk in llm.stream(msgs):
+            text = _content_text(chunk.content)
+            if text:
+                plan_text += text
+                writer({"type": "plan_token", "text": text})
+    except Exception as exc:
+        # 规划失败不阻断主流程：清空方案，react 直接执行
+        writer({"type": "plan_end", "plan": "", "warning": f"规划阶段异常，跳过方案: {exc}"})
+        return {"plan": ""}
+
+    writer({"type": "plan_end", "plan": plan_text})
+    return {"plan": plan_text}
+
+
 def agent_react_node(state: ChatState) -> ChatState:
     """ReAct 多步自主工具循环（路线 A）：模型 思考→调工具→观察 反复，直到给出最终答案。
 
@@ -290,6 +343,11 @@ def agent_react_node(state: ChatState) -> ChatState:
         has_hits=has_hits,
         tool_table=build_tool_table(tools),
     )
+
+    # 若上游 plan_node 产出了执行方案，注入为执行指令（不写入持久化历史，仅当轮）
+    plan = (state.get("plan") or "").strip()
+    if plan:
+        system_prompt += PLAN_INJECT_PREFIX + plan
 
     llm = _build_llm(state["chat_cfg"])
     try:
@@ -344,7 +402,11 @@ def agent_react_node(state: ChatState) -> ChatState:
                 result = getattr(out, "content", None)
                 result = str(result if result is not None else out)
                 tool_items.append({"name": info["name"], "args": info.get("args"), "result": result})
-                writer({"type": "tool_end", "name": info["name"], "result": result})
+                # ToolMessage.status=='error' 时明确标失败，供前端清单渲染 [❌]
+                end_ev = {"type": "tool_end", "name": info["name"], "result": result}
+                if getattr(out, "status", None) == "error":
+                    end_ev["error"] = result
+                writer(end_ev)
 
     hit_limit = False
     try:

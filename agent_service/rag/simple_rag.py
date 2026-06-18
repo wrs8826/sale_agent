@@ -64,12 +64,17 @@ class RAGConfig:
     reranker: Optional[Dict[str, str]] = None
     embedding: Optional[Dict[str, str]] = None
 
+    # config.yaml 顶层有意存在、但不属于 RAG 配置的编排开关：
+    # 由 api/services 的专用读取器（get_agent_mode / get_plan_first）直接读原始 yaml 消费，
+    # 不进 RAGConfig。列入白名单后 from_dict 不再对它们打"未知字段"警告。
+    _NON_RAG_KEYS = frozenset({"agent_mode", "enable_planning"})
+
     @classmethod
     def from_dict(cls, data: Dict) -> "RAGConfig":
         data = dict(data)
         # 只保留 dataclass 已知字段，忽略 YAML 中多余的 key，避免 TypeError。
         known = {f.name for f in fields(cls)}
-        unknown = set(data) - known
+        unknown = set(data) - known - cls._NON_RAG_KEYS
         if unknown:
             print(f"警告: config 中存在未知字段，将被忽略: {sorted(unknown)}")
         data = {k: v for k, v in data.items() if k in known}

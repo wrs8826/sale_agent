@@ -479,24 +479,55 @@
       border: none; background: none; padding: 0 2px; line-height: 1; font-size: 14px;
     }
     .attach-chip .chip-x:hover { color: #4338ca; }
-    /* 工具调用记录（Phase 0 工具轮持久化）：折叠卡片 */
-    .tool-msg {
+
+    /* 执行方案卡片（先列方案再执行）：独立于回答气泡，开头折叠展示 */
+    .plan-card {
       align-self: flex-start; max-width: 78%; margin-left: 46px;
-      background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 11px;
-      font-size: 12px; color: #6b7280;
+      background: #f5f7ff; border: 1px solid #dbe3ff; border-radius: 11px;
+      font-size: 12px; color: #4b5563;
     }
-    .tool-msg > summary {
+    .plan-card > summary {
       cursor: pointer; list-style: none; user-select: none;
       display: flex; align-items: center; gap: 7px; padding: 8px 11px;
+      font-weight: 600; color: #4060c0;
     }
-    .tool-msg > summary::-webkit-details-marker { display: none; }
-    .tool-msg .tool-name { font-weight: 600; color: #4b5563; }
-    .tool-msg .tool-args { color: #9ca3af; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .tool-msg .tool-result {
-      margin: 0; padding: 0 11px 11px; font-size: 11px; line-height: 1.6;
-      white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto;
-      font-family: inherit; color: #6b7280;
+    .plan-card > summary::-webkit-details-marker { display: none; }
+    .plan-card .plan-body {
+      padding: 0 13px 10px; font-size: 12.5px; line-height: 1.7; color: #475569;
     }
+    .plan-card .plan-body ol, .plan-card .plan-body ul { margin: 4px 0; padding-left: 20px; }
+    .plan-card .plan-body li { margin: 3px 0; }
+
+    /* 下载按钮（由真实工具结果渲染，不依赖模型转述链接） */
+    .download-btn {
+      align-self: flex-start; margin-left: 46px;
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 9px 14px; border-radius: 10px; text-decoration: none;
+      background: #2563eb; color: #fff; font-size: 13px; font-weight: 600;
+      border: none; cursor: pointer; max-width: 78%;
+    }
+    .download-btn:hover { background: #1d4ed8; }
+    .download-btn .dl-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* 工具执行实时清单（可折叠）：[ ] 未完成 / [✅] 成功 / [❌] 失败 */
+    .tool-steps {
+      align-self: flex-start; max-width: 78%; margin-left: 46px;
+      background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 11px;
+      font-size: 12.5px; color: #4b5563;
+    }
+    .tool-steps > summary {
+      cursor: pointer; list-style: none; user-select: none;
+      padding: 8px 11px; font-weight: 600; color: #374151;
+    }
+    .tool-steps > summary::-webkit-details-marker { display: none; }
+    .tool-steps .ts-body { padding: 0 11px 9px; }
+    .tool-steps .ts-item {
+      font-family: ui-monospace, Consolas, monospace; line-height: 1.9;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .tool-steps .ts-running { color: #6b7280; }
+    .tool-steps .ts-ok { color: #16a34a; }
+    .tool-steps .ts-error { color: #dc2626; }
 
     /* ══ 设置页 ══════════════════════════════════════════════════════ */
     .settings-body { flex: 1; overflow-y: auto; padding: 24px; }
@@ -1225,11 +1256,34 @@ function renderTab(tabId) {
     chatWelcome.style.display = '';
   } else {
     chatWelcome.style.display = 'none';
-    for (const m of t.messages) {
-      if (m.role === 'tool') { appendToolMsg(m); continue; }
+    const msgs = t.messages;
+    for (let i = 0; i < msgs.length; i++) {
+      const m = msgs[i];
+      if (m.role === 'tool') {
+        // 重载历史：把连续的 role=tool 消息合并成一个新版执行清单（与 live 一致）
+        const group = [];
+        while (i < msgs.length && msgs[i].role === 'tool') { group.push(msgs[i]); i++; }
+        i--;  // 回退一格，外层 for 会再 +1
+        const tools = group.map(g => ({
+          name: g.name || '工具',
+          status: /\[工具执行失败\]/.test(g.content || '') ? 'error' : 'ok',
+        }));
+        renderToolChecklist(group[0].id, tools, { open: false });
+        // 持久化的 generate_word_document 工具消息 → 下载按钮
+        for (const g of group) {
+          if (g.name === 'generate_word_document') {
+            const mt = (g.content || '').match(/\/download\/[^\s)\]]+\.docx/);
+            if (mt) renderDownloadBtn(g.id, mt[0], decodeURIComponent(mt[0].split('/').pop()));
+          }
+        }
+        continue;
+      }
+      if (m.role !== 'user' && m.plan) renderPlanCard(m.id, m.plan);  // 执行方案卡片在回答气泡前
+      if (m.role !== 'user' && m.tools && m.tools.length) renderToolChecklist(m.id, m.tools, { open: !!m.streaming });
       const row = appendMsg(m.role === 'user' ? 'user' : 'agent',
         renderMd(m.content || (m.streaming ? '…' : '')), { fromHistory: true, time: m.time });
       row.dataset.msgId = m.id;
+      if (m.role !== 'user' && m.download) renderDownloadBtn(m.id, m.download.url, m.download.filename);
     }
   }
 
@@ -1476,21 +1530,84 @@ function appendMsg(role, html, { fromHistory, time } = {}) {
   return row;
 }
 
-/* 渲染历史里的工具调用记录（Phase 0 工具轮持久化）：折叠卡片 */
-function appendToolMsg(m) {
-  const det = document.createElement('details');
-  det.className = 'tool-msg';
-  const argsStr = (m.args && Object.keys(m.args).length) ? esc(JSON.stringify(m.args)) : '';
-  det.innerHTML =
-    '<summary>' +
-    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0">' +
-    '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>' +
-    '<span class="tool-name">工具 ' + esc(m.name || '') + '</span>' +
-    (argsStr ? '<span class="tool-args">' + argsStr + '</span>' : '') +
-    '</summary>' +
-    '<pre class="tool-result">' + esc(m.content || '') + '</pre>';
-  chatBody.appendChild(det);
+/* 执行方案卡片：先列方案再执行。live 流式时按 assistantId 复用同一卡片；
+   planText 流式中折叠展开、结束后默认折叠。返回卡片元素。 */
+function renderPlanCard(assistantId, planText, { open = false } = {}) {
+  const id = 'plan-' + assistantId;
+  let det = chatBody.querySelector('#' + CSS.escape(id));
+  if (!det) {
+    det = document.createElement('details');
+    det.className = 'plan-card';
+    det.id = id;
+    det.innerHTML =
+      '<summary>' +
+      '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#4060c0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0">' +
+      '<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>' +
+      '<span>📋 执行方案</span></summary>' +
+      '<div class="plan-body"></div>';
+    chatBody.appendChild(det);
+  }
+  det.open = open;
+  det.querySelector('.plan-body').innerHTML = renderMd(planText || '…');
   return det;
+}
+
+/* 下载按钮：按真实工具结果渲染，href 指向后端 /download 路由，不依赖模型转述链接。
+   按 assistantId 复用同一按钮；放在回答气泡之后。 */
+function renderDownloadBtn(assistantId, url, filename) {
+  if (!url) return null;
+  const id = 'dl-' + assistantId;
+  let a = chatBody.querySelector('#' + CSS.escape(id));
+  if (!a) {
+    a = document.createElement('a');
+    a.className = 'download-btn';
+    a.id = id;
+    chatBody.appendChild(a);
+  }
+  a.href = url;
+  a.setAttribute('download', filename || '');
+  a.innerHTML =
+    '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0">' +
+    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>' +
+    '<span class="dl-name">下载 ' + esc(filename || '文档') + '</span>';
+  return a;
+}
+
+/* 工具执行实时清单：按 assistantId 复用，每个工具事件刷新一次。
+   status: running→[ ] / ok→[✅] / error→[❌]。整体可折叠。 */
+function renderToolChecklist(assistantId, tools, { open = true } = {}) {
+  if (!tools || !tools.length) return null;
+  const id = 'tools-' + assistantId;
+  let det = chatBody.querySelector('#' + CSS.escape(id));
+  if (!det) {
+    det = document.createElement('details');
+    det.className = 'tool-steps';
+    det.id = id;
+    det.open = open;
+    det.innerHTML = '<summary></summary><div class="ts-body"></div>';
+    chatBody.appendChild(det);
+  }
+  const done = tools.filter(t => t.status !== 'running').length;
+  det.querySelector('summary').textContent = `🔧 执行过程（${done}/${tools.length}）`;
+  det.querySelector('.ts-body').innerHTML = tools.map(t => {
+    const mark = t.status === 'ok' ? '[✅]' : t.status === 'error' ? '[❌]' : '[ ]';
+    return `<div class="ts-item ts-${t.status}">${mark} ${esc(t.name || '')}</div>`;
+  }).join('');
+  return det;
+}
+
+/* 工具事件 → 更新助手消息上的 m.tools 列表（tool_start 入列、tool_end 改状态） */
+function applyToolEvent(m, ev) {
+  if (!m) return;
+  m.tools = m.tools || [];
+  if (ev.type === 'tool_start') {
+    m.tools.push({ name: ev.name, status: 'running' });
+  } else { // tool_end
+    const step = [...m.tools].reverse().find(s => s.name === ev.name && s.status === 'running');
+    const status = ev.error ? 'error' : 'ok';
+    if (step) step.status = status;
+    else m.tools.push({ name: ev.name, status });
+  }
 }
 
 function appendThinking() {
@@ -1645,6 +1762,7 @@ async function doSend() {
 
   const assistantId = genId();
   let agentText = '';
+  let planText = '';
   let started = false;
   let aborted = false;
   const controller = new AbortController();
@@ -1690,7 +1808,64 @@ async function doSend() {
         if (!line) continue;
         let ev; try { ev = JSON.parse(line); } catch { continue; }
 
-        if (ev.type === 'token') {
+        if (ev.type === 'plan_start') {
+          // 先列执行方案：提前建占位助手消息承载方案（切 tab 重渲染时方案卡片不丢）
+          planText = '';
+          t.thinking = false;
+          if (!started) {
+            started = true;
+            t.messages.push({ id: assistantId, role: 'assistant', content: '', plan: '', streaming: true, time: sendTime });
+          }
+          if (tabId === activeTabId) {
+            chatWelcome.style.display = 'none';
+            document.getElementById('thinking-row')?.remove();
+            renderPlanCard(assistantId, '…', { open: true });
+            chatBody.scrollTop = chatBody.scrollHeight;
+          }
+        } else if (ev.type === 'plan_token') {
+          planText += ev.text || '';
+          const m = t.messages.find(x => x.id === assistantId);
+          if (m) m.plan = planText;
+          if (tabId === activeTabId) {
+            renderPlanCard(assistantId, planText, { open: true });
+            chatBody.scrollTop = chatBody.scrollHeight;
+          }
+        } else if (ev.type === 'plan_end') {
+          planText = ev.plan || planText;
+          const m = t.messages.find(x => x.id === assistantId);
+          if (m) m.plan = planText;
+          if (tabId === activeTabId) {
+            if (planText.trim()) {
+              renderPlanCard(assistantId, planText, { open: false });  // 完成后默认折叠
+            } else {
+              chatBody.querySelector('#' + CSS.escape('plan-' + assistantId))?.remove();  // 方案为空：撤掉卡片
+            }
+          }
+          if (!planText.trim() && m) delete m.plan;
+        } else if (ev.type === 'tool_start' || ev.type === 'tool_end') {
+          // 工具执行实时清单：每个工具事件刷新一次，[ ]/[✅]/[❌]
+          if (!started) {
+            started = true;
+            t.messages.push({ id: assistantId, role: 'assistant', content: '', streaming: true, time: sendTime });
+          }
+          const m = t.messages.find(x => x.id === assistantId);
+          applyToolEvent(m, ev);
+          t.thinking = false;
+          if (tabId === activeTabId) {
+            chatWelcome.style.display = 'none';
+            document.getElementById('thinking-row')?.remove();
+            renderToolChecklist(assistantId, m.tools, { open: true });
+            chatBody.scrollTop = chatBody.scrollHeight;
+          }
+        } else if (ev.type === 'download') {
+          // 确定性下载：按真实工具结果记录下载信息，done 后渲染按钮（保证排在回答气泡之后）
+          if (!started) {
+            started = true;
+            t.messages.push({ id: assistantId, role: 'assistant', content: '', streaming: true, time: sendTime });
+          }
+          const m = t.messages.find(x => x.id === assistantId);
+          if (m) m.download = { url: ev.url, filename: ev.filename };
+        } else if (ev.type === 'token') {
           agentText += ev.text || '';
           if (!started) {
             started = true;
@@ -1728,6 +1903,10 @@ async function doSend() {
               row.dataset.msgId = assistantId;
             }
             row.querySelector('.msg-bubble').innerHTML = renderMd(agentText || '（无回答）');
+            const tdet = document.getElementById('tools-' + assistantId);
+            if (tdet) tdet.open = false;   // 完成后折叠执行清单
+            const dm = t.messages.find(x => x.id === assistantId);
+            if (dm && dm.download) renderDownloadBtn(assistantId, dm.download.url, dm.download.filename);
             feedbackBar.style.display = '';
           }
         } else if (ev.type === 'auto_compacted') {

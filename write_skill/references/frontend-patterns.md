@@ -178,6 +178,34 @@ async function someStreamingCall() {
 
 加新事件类型 → 在 `if/else if` 链里加一行即可，**不需要改通信框架**。
 
+### 执行方案卡片（`plan_*`，先列方案再执行）
+
+react + `enable_planning` 时，后端在 `token` 之前先流式推 `plan_start` / `plan_token` / `plan_end`。两端都把方案渲染成独立「📋 执行方案」折叠卡片，**置于回答气泡之前**：
+
+- **`plan_start`**：若助手消息尚未建（方案早于 token 到达），**提前建占位助手消息**（`content:''`, `plan:''`, `streaming:true`），并把 `started=true`，避免随后 `token` 再 push 重复消息。
+- **`plan_token`**：累加到该助手消息的 `plan` 字段，流式中卡片展开。
+- **`plan_end`**：定型；`plan` 为空（规划失败/跳过）则删除 `plan` 字段、撤掉卡片；非空则折叠卡片。
+
+把 `plan` 存在助手消息对象上（而非游离 DOM），切 tab 重渲染时方案卡片不丢。`user.html`：`renderPlanCard(assistantId, planText, {open})` + `renderTab` 里 `if (m.plan) renderPlanCard(...)`。`ChatPage.tsx`：消息渲染处 `msg.plan && <details>…<ReactMarkdown>{msg.plan}</ReactMarkdown></details>`，类型 `ChatMessage.plan?: string`。方案**不持久化**到后端，刷新后不再出现（仅当轮 thinking 产物）。
+
+### 工具执行实时清单（`tool_start` / `tool_end`，可折叠）
+
+live 流式时把工具执行渲染成一个**可折叠清单**，每个工具一行：未完成 `[ ]`、成功 `[✅]`、失败 `[❌]`，每个工具事件刷新一次（含 `提取关键词`/`检索知识库` 等管线步骤）。
+
+- 数据存助手消息 `m.tools = [{name, status:'running'|'ok'|'error'}]`。`tool_start` → push `{name, status:'running'}`；`tool_end` → 从后往前找**同名且 running** 的项，置 `ok`/`error`（有 `error` 字段则 `error`）。
+- `user.html`：`renderToolChecklist(assistantId, tools, {open})` + `applyToolEvent(m, ev)`；SSE 循环里 `tool_start`/`tool_end` 分支调用；`done` 时把清单 `<details>` 折叠（`open=false`）；`renderTab` 里 `m.tools` 重渲染。
+- `ChatPage.tsx`：`msg.tools && <details open={!!msg.streaming}>…</details>`，类型 `ChatMessage.tools?`。
+- 置于**回答气泡之前**（顺序：执行方案卡片 → 工具清单 → 回答气泡 → 下载按钮）。
+- **重载历史也用同一套清单 UI**（旧的 per-tool 折叠卡片 `appendToolMsg` / `.tool-msg` / `Wrench` 卡片已删除）：`renderTab`（user.html）/ 渲染前预处理（ChatPage.tsx）把**连续的 `role=tool` 消息合并成一个清单**，status 由内容判定（含 `[工具执行失败]` → `[❌]`，否则 `[✅]`，重载无 running 态），并对其中的 `generate_word_document` 渲染下载按钮。live 的 `m.tools` 不持久化，重载时从持久化的 `role=tool` 消息重建。
+
+### 下载按钮（`download` 事件，文件生成）
+
+**绝不依赖模型把下载链接写进回答**——实测模型会把链接写错/编造。后端从真实工具结果抽出 `/download/...docx` 下发 `download` 事件（`{url, filename}`），前端据此渲染一个真实 `<a download href={url}>` 按钮：
+
+- **live**：收到 `download` 事件 → 存到助手消息 `m.download = {url, filename}`；按钮在回答气泡之后渲染（`user.html` 在 `done` 时 `renderDownloadBtn(...)`；`ChatPage.tsx` 渲染 `msg.download && <a>`）。
+- **重载历史**：`download` 不持久化，但持久化的 `role=tool`（`generate_word_document`）消息内容含链接——两端在渲染该工具消息时用正则 `/download\/[^\s)\]]+\.docx/` 抽链接、渲染同款按钮。
+- 按钮 `href` 是**相对路径** `/download/...`，依赖入口（Flask 直服 / nginx / vite 代理）把 `/download` 转发到后端；`web-admin` 开发态需在 `vite.config.ts` 代理 **`/download`**（顺带补 **`/admin`**，否则政策 Skill 页 `/admin/policy-*` 也断）。类型 `ChatMessage.download?: {url; filename}`。相对链接会自动指向当前访问地址——本机用 `http://localhost:5002` 访问管理端即走本地下载，不经任何公网入口（详见 common-pitfalls #38）。
+
 ## 共享小工具
 
 ```js

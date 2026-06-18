@@ -75,30 +75,40 @@ def extract_text_from_file(path: Path) -> str:
 
 @tool
 def load_policy_file(skill_name: str, filename: str) -> str:
-    """读取指定 skill 的 references 目录中的政策文档文件，返回文件全文。
+    """读取指定 skill 的政策文档文件，返回文件全文。
 
-    适用场景：当用户询问某个人才政策的具体细节（申报条件、资金政策、
-    操作流程等），且已通过 SKILL.md 文档地图确定了目标文件时调用本工具。
+    适用场景：用户询问某个人才政策的具体细节（申报条件、资金政策、操作流程等）时，
+    按**你系统提示里已给出的「文档地图」**选定目标文件后调用本工具读取原文。
+    （文档地图已在系统提示中，无需再读 SKILL.md 获取；如确需，传 filename="SKILL.md" 也可读到。）
 
     Args:
         skill_name: skill 目录名，例如 "甬江人才政策"、"太仓人才政策"、
                     "无锡人才政策"、"成都人才政策"。
-        filename:   文件名（含 .md 扩展名），例如 "申报条件_制造业.md"、
-                    "甬才通_变更立项与经费.md"。仅传文件名，不含路径前缀。
+        filename:   文件名（含 .md 扩展名），例如 "申报条件_制造业.md"。
+                    传文档地图里的文件名即可；带不带 "references/" 前缀都行（会自动处理）。
+                    传 "SKILL.md" 可读取该 skill 的索引/文档地图本身。
 
     Returns:
-        文件全文字符串；若文件不存在则返回错误说明。
+        文件全文字符串；若文件不存在则返回错误说明（含可用文件清单）。
     """
+    from pathlib import Path
+
     from agent_service import SKILLS_ROOT
-    path = SKILLS_ROOT / skill_name / "references" / filename
-    if not path.exists():
-        available = []
-        refs_dir = SKILLS_ROOT / skill_name / "references"
-        if refs_dir.exists():
-            available = [f.name for f in sorted(refs_dir.iterdir()) if f.suffix == ".md"]
-        if available:
-            return f"文件 {filename!r} 不存在。{skill_name}/references/ 中可用文件：{available}"
-        return f"文件 {filename!r} 不存在，或 skill {skill_name!r} 的 references 目录为空。"
+
+    skill_dir = SKILLS_ROOT / skill_name
+    safe = Path(filename).name  # 去掉任何路径前缀（如 references/）并防目录穿越
+    # 先 references/，再 skill 根目录（SKILL.md 等索引文件在根目录）
+    candidates = [skill_dir / "references" / safe, skill_dir / safe]
+    path = next((p for p in candidates if p.is_file()), None)
+
+    if path is None:
+        refs_dir = skill_dir / "references"
+        refs = [f.name for f in sorted(refs_dir.glob("*.md"))] if refs_dir.is_dir() else []
+        roots = [f.name for f in sorted(skill_dir.glob("*.md"))] if skill_dir.is_dir() else []
+        if refs or roots:
+            return (f"文件 {filename!r} 不存在。{skill_name}/references/ 可用文件：{refs}；"
+                    f"{skill_name}/ 根目录可用文件：{roots}")
+        return f"文件 {filename!r} 不存在，或 skill {skill_name!r} 目录为空。"
     try:
         return path.read_text(encoding="utf-8")
     except Exception as exc:

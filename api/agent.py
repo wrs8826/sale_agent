@@ -18,6 +18,23 @@ bp = Blueprint("agent", __name__)
 
 _COMPACT_CMDS = {"compact", "/compact"}
 
+# generate_word_document 工具结果里下载链接的形态：[显示名](/download/文件名.docx)
+_DOWNLOAD_RE = re.compile(r"/download/(?P<file>[^\s\)\]]+\.docx)")
+
+
+def _extract_download(tool_result: str):
+    """从 generate_word_document 的工具结果中抽取下载信息。
+
+    Returns: {"url": "/download/...", "filename": "..."} 或 None。
+    供 SSE `download` 事件与前端下载按钮使用，使下载不依赖模型转述链接。
+    """
+    from urllib.parse import unquote
+    m = _DOWNLOAD_RE.search(tool_result or "")
+    if not m:
+        return None
+    url = m.group(0)
+    return {"url": url, "filename": unquote(m.group("file"))}
+
 _FEEDBACK_SYSTEM = (
     "你是一个对话清洗助手。请从下方知识库问答对话中提取可作为知识库素材的事实信息。\n"
     "\n"
@@ -186,7 +203,8 @@ def agent_chat():
         "skill_table": build_skill_table(),   # L1 常驻注入
         "web_tools": True,                    # 启用网页端专属工具（文档读取）；飞书路径不带此标志
         "agent_mode": agent_mode,
-        "max_tool_rounds": 5,                 # react 模式最大工具调用轮数
+        "max_tool_rounds": 15,                # react 模式最大工具调用轮数
+        "enable_planning": services.get_plan_first(),  # react：执行前先列方案（任务拆分）
     }
 
     def generate():
@@ -269,6 +287,12 @@ def agent_chat():
                 elif etype == "tool_turn":
                     tool_items_acc = event.get("items") or tool_items_acc
                     continue  # 内部事件，不下发前端
+                elif etype == "tool_end" and event.get("name") == "generate_word_document":
+                    # 确定性下载：从真实工具结果里抽出 /download/xxx.docx，下发结构化 download 事件，
+                    # 前端据此渲染下载按钮——不依赖模型把链接原样转述（模型常写错/编造链接）。
+                    dl = _extract_download(str(event.get("result") or ""))
+                    if dl:
+                        yield f"data: {json.dumps({'type': 'download', **dl}, ensure_ascii=False)}\n\n"
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as exc:
             err = {"type": "error", "message": str(exc)}

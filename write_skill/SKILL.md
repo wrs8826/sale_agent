@@ -40,7 +40,7 @@ F:/销售agent/
 | `rag/simple_rag.py` | `DocumentChunker` / `EmbedderFactory` / `HybridRetriever` / `DashScopeReranker` / `RAGConfig` |
 | `graph/state.py` | `CleaningState` + `ChatState` 两份 TypedDict |
 | `graph/cleaning/` | 清洗子图：`route_input → read_file? → clean → END` |
-| `graph/qa/` | QA 主图，`build_qa_graph(agent_mode)` 两形态：**single**（`call_tools→extract→retrieve?→generate`，单趟一次工具）/ **react**（`extract→retrieve?→agent_react`，`create_react_agent` 多步自主工具循环，`max_tool_rounds=5`，`astream_events`→SSE）。由 `services.get_agent_mode()`（env `AGENT_MODE`>config 顶层 `agent_mode`>single）切换；网页端+飞书降级共用。节点用 `get_stream_writer` 推 SSE |
+| `graph/qa/` | QA 主图，`build_qa_graph(agent_mode)` 两形态：**single**（`call_tools→extract→retrieve?→generate`，单趟一次工具）/ **react**（`extract→retrieve?→plan→agent_react`，`create_react_agent` 多步自主工具循环，`max_tool_rounds` 网页端传 15/节点默认 5，`astream_events`→SSE）。由 `services.get_agent_mode()`（env `AGENT_MODE`>config 顶层 `agent_mode`>single）切换；网页端+飞书降级共用。`plan` 节点（先列方案再执行）按 `enable_planning`（`get_plan_first()`，env `PLAN_FIRST`>config>False）门控，仅 react；节点用 `get_stream_writer` 推 SSE |
 | `mcp/lark_mcp.json` | 飞书凭证（顶层 `app_id/app_secret/...` + `oauth_redirect_uri` + `public_base_url`：对外基地址，飞书下载绝对链接用，缺省回退 oauth_redirect_uri 的 origin）+ MCP 服务器配置（`mcpServers`）。**注册两个 MCP server**：`lark-mcp`（官方 `@larksuiteoapi/lark-mcp`，纯飞书工具）+ `builtin-tools`（`python -m agent_service.mcp.builtin_mcp_server`，3 个核心工具） |
 | `mcp/mcp_manager.py` | `MCPManager` 单例：后台 asyncio 线程，`MultiServerMCPClient(mcpServers)` 把**两个 server 的工具合并**成 `self._tools` 注入飞书 ReAct Agent；状态回调，同步桥接 |
 | `mcp/lark_bot.py` | `LarkBot` 单例：`lark-oapi` SDK 长连接接收飞书消息；`_query()` 入口调 `detect_skill()` 注入 skill 提示词，两条路径（MCP Agent / RAG QA 图）均感知 skill |
@@ -72,7 +72,7 @@ F:/销售agent/
 | `users.py` | **用户管理蓝图**（`/users/*`，仅 admin）：列表 / 修改信息 / 删除 / 封禁 |
 | `conv_stats.py` | 对话统计 MySQL 模块：`conversation_stats` 表，`ensure_table()` / `get_compact_count` / `increment_compact_count`（+1）/ `reset_compact_count`（L4 熔断后清零）；计数全持久化，刷新/重启不丢 |
 | `session_store.py` | Redis Session 配置：`configure_session(app, key_prefix)`，服务端 session + 滑动空闲超时（`SESSION_IDLE_MINUTES`），用户/管理端各用前缀隔离 |
-| `services.py` | 单例（RAG / Reranker），settings 四段访问器 + `cfg_with_embedding(cfg)` + `get_wiki_dir()` + `get_agent_mode()`（react/single feature flag，env `AGENT_MODE`>config>single） |
+| `services.py` | 单例（RAG / Reranker），settings 四段访问器 + `cfg_with_embedding(cfg)` + `get_wiki_dir()` + `get_agent_mode()`（react/single flag，env `AGENT_MODE`>config>single）+ `get_plan_first()`（先列方案 flag，env `PLAN_FIRST`>config `enable_planning`>False） |
 | `agent.py` | `POST /agent/chat`（SSE，QA 图驱动）+ `POST /feedback`（清洗子图） |
 | `knowledge.py` | `/files` CRUD、`POST /upload`（`ALLOWED_EXT`=.txt/.md/.rst/.html/.pdf/.docx）、`POST /ingest`（SSE，读取走 `extract_text_from_file`；PDF/.docx 二进制原件清洗后**不回写**以保留原文供 `read_document` 读取，纯文本仍回写）、`POST /query`、`POST /vectordb/clear`、`GET /download/<file>`（下载工具产物，防目录穿越） |
 | `settings.py` | `GET/POST /settings` + `POST /settings/test`（四模型连通测试） |
@@ -166,7 +166,7 @@ CREATE TABLE users (
 ## 不可违反的项目约定
 
 1. **API key 永远加密**：经手 `services.encrypt/decrypt`，绝不明文落 `config.yaml`。从 settings 拿值只用 `services.load_chat_settings()` / `load_cleaner_settings()` / `load_reranker_settings()` / `load_embedding_settings()`。
-2. **SSE 事件类型保持稳定**：前端协议是 `tool_start` / `tool_end` / `token` / `done` / `error` / `status` / `conversation_saved` / `compact_done` / `auto_compacted` / `circuit_break`（L4 熔断）/ `result`（feedback 专用）/ `warning`。加新类型 OK，**不要改老类型语义**。注：`tool_turn` 是 call_tools_node → api 的内部事件，api 层 `continue` 不下发前端。
+2. **SSE 事件类型保持稳定**：前端协议是 `tool_start` / `tool_end` / `plan_start` / `plan_token` / `plan_end`（先列方案，react+enable_planning）/ `token` / `download`（生成文件后由 api 从真实工具结果抽 `/download/...` 下发，前端渲染下载按钮，不靠模型转述）/ `done` / `error` / `status` / `conversation_saved` / `compact_done` / `auto_compacted` / `circuit_break`（L4 熔断）/ `result`（feedback 专用）/ `warning`。加新类型 OK，**不要改老类型语义**。注：`tool_turn` 是 call_tools_node/agent_react → api 的内部事件，api 层 `continue` 不下发前端。
 3. **不绕过单例**：RAG 实例必须 `services.get_rag(...)` 拿，Reranker 必须 `services.get_reranker()`。直接 `HybridRetriever(...)` 会让缓存失效逻辑失灵。
 4. **存储留在 api 层**：清洗子图 / QA 图都是纯函数路径；chroma 写入、文件落盘只能在 `api/` 内做。
 5. **路径用绝对常量**：从不写 `Path("docs")`，永远 `DOCS_DIR / filename`，否则不同 CWD 启动会炸。

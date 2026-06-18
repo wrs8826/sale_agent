@@ -119,6 +119,22 @@ mask(plaintext: str) -> str           # "sk-******1234"，给前端显示
 5. 前端 `web/assets/settings.js:SECTIONS` 加新字段渲染（用 `buildField()`）
 6. 前端 `fillForm()` / `saveSettings()` 不用改（自动按 `data-section/data-field` 取所有 input）
 
+### 场景 1.5：加一个"非 RAG 的顶层编排开关"（如 `agent_mode` / `enable_planning`）
+
+这类开关写在 `config.yaml` 顶层，但**不属于 RAG 配置**，由 `api/services.py` 的专用读取器直接读原始 yaml 消费（`get_agent_mode()` / `get_plan_first()`，内部走 `_read_raw_yaml()`，**绕过 `RAGConfig`**，因此每请求热生效、无需重启）。
+
+`RAGConfig.from_dict()` 会对任何不在 dataclass 字段里的 yaml key 打印「未知字段，将被忽略」警告。这类顶层开关**不应**加成 `RAGConfig` 字段（会污染 RAG 配置），而应登记进 `RAGConfig._NON_RAG_KEYS` 白名单，避免误导性警告：
+
+```python
+# agent_service/rag/simple_rag.py
+_NON_RAG_KEYS = frozenset({"agent_mode", "enable_planning"})   # 无类型注解 → 不会被当成 dataclass 字段
+# from_dict 里：unknown = set(data) - known - cls._NON_RAG_KEYS
+```
+
+步骤：① `config.yaml` 顶层加 key；② `services.py` 写 `get_<flag>()` 读取器（env > config 顶层 > 默认）；③ 把 key 加进 `_NON_RAG_KEYS`；④ 消费处调 `get_<flag>()`。
+
+> 排错：若控制台出现「config 中存在未知字段，将被忽略: ['agent_mode']」，**不代表该开关失效**——它仍被 `get_agent_mode()` 读到；该警告仅说明它没进 `_NON_RAG_KEYS` 白名单。
+
 ### 场景 2：新增一个段（不太常见）
 
 1. `agent_service/config.yaml` 加段

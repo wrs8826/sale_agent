@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react'
 import {
   Send, Square, Trash2, Bot, User, AlertCircle, Star,
   Plus, MessageSquare, Pencil, X, Check, Copy, ChevronDown,
-  Circle, UserCircle, Paperclip, Wrench,
+  Circle, UserCircle, Paperclip, ClipboardList, Download,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -395,7 +395,73 @@ const ChatPage: React.FC = () => {
           if (!raw) continue
           try {
             const evt = JSON.parse(raw)
-            if (evt.type === 'token') {
+            if (evt.type === 'plan_start') {
+              // 先列执行方案：提前建占位助手消息承载方案
+              if (!started) {
+                started = true
+                updateTab(tabId, t => ({
+                  ...t,
+                  thinking: false,
+                  messages: [...t.messages, { id: assistantId, role: 'assistant', content: '', plan: '', streaming: true, time: sendTime }],
+                }))
+              }
+            } else if (evt.type === 'plan_token') {
+              const txt = evt.text || ''
+              updateTab(tabId, t => ({
+                ...t,
+                messages: t.messages.map(m => m.id === assistantId ? { ...m, plan: (m.plan || '') + txt } : m),
+              }))
+            } else if (evt.type === 'plan_end') {
+              const finalPlan = (evt.plan || '').trim()
+              updateTab(tabId, t => ({
+                ...t,
+                messages: t.messages.map(m => m.id === assistantId ? { ...m, plan: finalPlan || undefined } : m),
+              }))
+            } else if (evt.type === 'tool_start' || evt.type === 'tool_end') {
+              // 工具执行实时清单：每个工具事件刷新一次，[ ]/[✅]/[❌]
+              if (!started) {
+                started = true
+                updateTab(tabId, t => ({
+                  ...t,
+                  thinking: false,
+                  messages: [...t.messages, { id: assistantId, role: 'assistant', content: '', streaming: true, time: sendTime }],
+                }))
+              }
+              updateTab(tabId, t => ({
+                ...t,
+                thinking: false,
+                messages: t.messages.map(m => {
+                  if (m.id !== assistantId) return m
+                  const tools = [...(m.tools || [])]
+                  if (evt.type === 'tool_start') {
+                    tools.push({ name: evt.name, status: 'running' })
+                  } else {
+                    const status: 'ok' | 'error' = evt.error ? 'error' : 'ok'
+                    let idx = -1
+                    for (let i = tools.length - 1; i >= 0; i--) {
+                      if (tools[i].name === evt.name && tools[i].status === 'running') { idx = i; break }
+                    }
+                    if (idx >= 0) tools[idx] = { ...tools[idx], status }
+                    else tools.push({ name: evt.name, status })
+                  }
+                  return { ...m, tools }
+                }),
+              }))
+            } else if (evt.type === 'download') {
+              // 确定性下载：按真实工具结果记录下载信息，渲染下载按钮（不依赖模型转述链接）
+              if (!started) {
+                started = true
+                updateTab(tabId, t => ({
+                  ...t,
+                  thinking: false,
+                  messages: [...t.messages, { id: assistantId, role: 'assistant', content: '', streaming: true, time: sendTime }],
+                }))
+              }
+              updateTab(tabId, t => ({
+                ...t,
+                messages: t.messages.map(m => m.id === assistantId ? { ...m, download: { url: evt.url, filename: evt.filename } } : m),
+              }))
+            } else if (evt.type === 'token') {
               if (!started) {
                 started = true
                 updateTab(tabId, t => ({
@@ -714,20 +780,61 @@ const ChatPage: React.FC = () => {
             </div>
           )}
 
-          {activeTab.messages.map(msg => (
-            msg.role === 'tool' ? (
-              /* 工具调用记录（Phase 0 工具轮持久化）：折叠卡片，对齐在助手气泡下 */
-              <details key={msg.id} className="self-start max-w-[78%] ml-11 bg-[#f7f7f8] border border-[#e5e5e5] rounded-xl">
-                <summary className="cursor-pointer select-none px-3 py-2 flex items-center gap-2 text-xs text-[#6b6b6b]">
-                  <Wrench size={13} className="text-[#3b82f6] shrink-0" />
-                  <span className="font-medium">工具 {msg.name || ''}</span>
-                  {msg.args && Object.keys(msg.args).length > 0 && (
-                    <span className="text-[#9ca3af] truncate">{JSON.stringify(msg.args)}</span>
-                  )}
-                </summary>
-                <pre className="px-3 pb-3 text-[11px] leading-relaxed text-[#6b6b6b] whitespace-pre-wrap break-words max-h-[240px] overflow-y-auto">{msg.content}</pre>
-              </details>
-            ) : (
+          {(() => {
+            // 把连续的 role=tool 消息合并成一个新版执行清单（与 live 一致），不再用旧版工具卡片
+            type RItem =
+              | { kind: 'tools'; id: string; tools: { name: string; status: 'ok' | 'error' }[]; downloads: { url: string; filename: string }[] }
+              | { kind: 'msg'; msg: MsgItem }
+            const items: RItem[] = []
+            for (let i = 0; i < activeTab.messages.length; i++) {
+              const mm = activeTab.messages[i]
+              if (mm.role === 'tool') {
+                const tools: { name: string; status: 'ok' | 'error' }[] = []
+                const downloads: { url: string; filename: string }[] = []
+                const startId = mm.id
+                while (i < activeTab.messages.length && activeTab.messages[i].role === 'tool') {
+                  const tm = activeTab.messages[i]
+                  tools.push({ name: tm.name || '工具', status: /\[工具执行失败\]/.test(tm.content || '') ? 'error' : 'ok' })
+                  if (tm.name === 'generate_word_document') {
+                    const dmt = (tm.content || '').match(/\/download\/[^\s)\]]+\.docx/)
+                    if (dmt) downloads.push({ url: dmt[0], filename: decodeURIComponent(dmt[0].split('/').pop() || '文档') })
+                  }
+                  i++
+                }
+                i--
+                items.push({ kind: 'tools', id: startId, tools, downloads })
+              } else {
+                items.push({ kind: 'msg', msg: mm })
+              }
+            }
+            return items.map((it) => {
+              if (it.kind === 'tools') {
+                return (
+                  <div key={it.id} className="self-start max-w-[78%] ml-11 flex flex-col gap-2">
+                    <details className="bg-[#f9fafb] border border-[#e5e7eb] rounded-xl">
+                      <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold text-[#374151]">
+                        🔧 执行过程（{it.tools.length}/{it.tools.length}）
+                      </summary>
+                      <div className="px-3 pb-2 font-mono text-[12.5px] leading-[1.9]">
+                        {it.tools.map((s, idx) => (
+                          <div key={idx} className={`truncate ${s.status === 'ok' ? 'text-[#16a34a]' : 'text-[#dc2626]'}`}>
+                            {s.status === 'ok' ? '[✅]' : '[❌]'} {s.name}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                    {it.downloads.map((d, idx) => (
+                      <a key={idx} href={d.url} download={d.filename}
+                        className="self-start inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-[#2563eb] hover:bg-[#1d4ed8] text-white text-[13px] font-semibold no-underline">
+                        <Download size={15} className="shrink-0" />
+                        <span className="truncate">下载 {d.filename}</span>
+                      </a>
+                    ))}
+                  </div>
+                )
+              }
+              const msg = it.msg
+              return (
             <div key={msg.id} className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
               <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-0.5
                 ${msg.role === 'user' ? 'bg-[#f3f4f6]' : 'bg-gradient-to-br from-[#3b82f6] to-[#6366f1]'}`}>
@@ -736,6 +843,33 @@ const ChatPage: React.FC = () => {
                   : <Bot size={15} className="text-white" />}
               </div>
               <div className="flex flex-col gap-1 max-w-[75%]">
+                {msg.role === 'assistant' && msg.plan && (
+                  /* 执行方案卡片（先列方案再执行）：折叠，置于回答气泡之前 */
+                  <details open={!!msg.streaming} className="self-start bg-[#f5f7ff] border border-[#dbe3ff] rounded-xl">
+                    <summary className="cursor-pointer select-none px-3 py-2 flex items-center gap-2 text-xs font-medium text-[#4060c0]">
+                      <ClipboardList size={13} className="shrink-0" />
+                      <span>📋 执行方案</span>
+                    </summary>
+                    <div className="prose-chat px-3 pb-2 text-[12.5px] leading-relaxed text-[#475569]">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.plan}</ReactMarkdown>
+                    </div>
+                  </details>
+                )}
+                {msg.role === 'assistant' && msg.tools && msg.tools.length > 0 && (
+                  /* 工具执行实时清单（可折叠）：[ ]/[✅]/[❌]，运行中默认展开 */
+                  <details open={!!msg.streaming} className="self-start bg-[#f9fafb] border border-[#e5e7eb] rounded-xl">
+                    <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold text-[#374151]">
+                      🔧 执行过程（{msg.tools.filter(s => s.status !== 'running').length}/{msg.tools.length}）
+                    </summary>
+                    <div className="px-3 pb-2 font-mono text-[12.5px] leading-[1.9]">
+                      {msg.tools.map((s, i) => (
+                        <div key={i} className={`truncate ${s.status === 'ok' ? 'text-[#16a34a]' : s.status === 'error' ? 'text-[#dc2626]' : 'text-[#6b7280]'}`}>
+                          {s.status === 'ok' ? '[✅]' : s.status === 'error' ? '[❌]' : '[ ]'} {s.name}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
                 <div className={`rounded-2xl px-4 py-3 text-sm ${msg.role === 'user'
                   ? 'bg-[#f3f4f6] text-[#171717]'
                   : 'bg-white border border-[#e5e5e5] text-[#171717]'}`}>
@@ -746,6 +880,14 @@ const ChatPage: React.FC = () => {
                       </div>
                     : msg.content}
                 </div>
+                {msg.role === 'assistant' && msg.download && (
+                  /* 确定性下载按钮：href 指向真实工具结果，不依赖模型转述链接 */
+                  <a href={msg.download.url} download={msg.download.filename}
+                    className="self-start inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-[#2563eb] hover:bg-[#1d4ed8] text-white text-[13px] font-semibold no-underline">
+                    <Download size={15} className="shrink-0" />
+                    <span className="truncate">下载 {msg.download.filename}</span>
+                  </a>
+                )}
                 <div className={`flex items-center gap-2 px-1 ${msg.role === 'user' ? 'justify-end' : ''}`}>
                   {msg.time && <span className="text-[10px] text-[#9ca3af]">{msg.time}</span>}
                   {msg.role === 'assistant' && !msg.streaming && msg.content && (
@@ -760,8 +902,9 @@ const ChatPage: React.FC = () => {
                 </div>
               </div>
             </div>
-            )
-          ))}
+              )
+            })
+          })()}
 
           {/* Thinking animation */}
           {activeTab.thinking && (
