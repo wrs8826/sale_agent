@@ -5,9 +5,11 @@
 ## 功能概览
 
 - **RAG 问答**：混合检索（BM25 + 向量）+ 可选重排序，支持自定义知识库
-- **流式输出**：Server-Sent Events（SSE）逐 token 推送（`tool_start / tool_end / token / done / auto_compacted / circuit_break / conversation_saved` 等事件）
-- **多步工具循环（ReAct）**：`agent_mode` feature flag 灰度切换——`single`（单趟一次工具）/ `react`（`create_react_agent` 多步 思考→调工具→观察，默认最多 5 轮）；网页端与飞书降级共用
+- **流式输出**：Server-Sent Events（SSE）逐 token 推送（`tool_start / tool_end / plan_* / token / download / done / auto_compacted / circuit_break / conversation_saved` 等事件）
+- **多步工具循环（ReAct）**：`agent_mode` feature flag 灰度切换——`single`（单趟一次工具）/ `react`（`create_react_agent` 多步 思考→调工具→观察，网页端最多 15 轮）；网页端与飞书降级共用
 - **先列方案再执行**：`enable_planning` 开关（仅 react 生效）——执行前先产出一份执行方案（任务拆分），以独立「📋 执行方案」卡片流式展示，并作为执行指令注入循环；仅网页端
+- **工具执行实时清单**：调用工具时前端实时渲染可折叠清单，未执行 `[ ]`、成功 `[✅]`、失败 `[❌]`，每个工具事件刷新一次；实时与历史、用户端与管理端统一同一套 UI
+- **确定性文件下载**：生成 Word 后由后端从真实工具结果下发下载链接、前端渲染「下载」按钮，不依赖模型转述链接（避免模型把链接写错/编造）
 - **内置工具**：读取文档（PDF / Word / 文本，`read_document`）、列文件、查政策原文、生成 Word（返回下载链接）、获取时间；网页端独有文档读取，飞书侧不暴露
 - **文档读取与上传**：知识库支持 `.txt/.md/.rst/.html/.pdf/.docx`；对话框回形针可直接上传文件让助手读取
 - **四级对话压缩**：L1 滑动窗口（最近 20 轮）+ L2 工具记录裁剪 + L3 滚动摘要（DeepSeek 分词器精确计数，1M 上下文预算）+ L4 熔断全局强压；工具调用持久化进历史
