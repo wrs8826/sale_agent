@@ -5,11 +5,14 @@
   L2  skill.system_prompt   → 关键词命中后注入：覆盖默认提示，激活专家角色
   L3  references/*.md       → 按需工具读取：load_policy_file(skill_name, filename) 返回政策原文
 
-生成节点的 system prompt 由 build_generate_system() 动态组装，优先级：
-  skill + RAG 命中  →  skill body + 检索片段
-  skill + RAG 未命中 →  skill body + 降级说明
-  无 skill + RAG 命中 →  通用提示 + 检索片段 + L1 Skill 表
-  无 skill + RAG 未命中 →  通用降级 + L1 Skill 表（引导用户聚焦）
+生成节点的 system prompt 由 build_generate_system() 动态组装为 **key:value 分段** 结构，
+每段形如 `<key>:\n<内容>`，段间空行分隔，便于模型定位与人工排查。段与内容来源：
+  identity   →  命中 skill 时用 skill body（L2）作角色；未命中用通用政策顾问角色 + 行为原则
+  knowledge  →  L1 Skill 表（可咨询的知识领域），常驻
+  tools      →  内置工具清单 + 调用约定（下载按钮等），常驻
+  workspace  →  本轮 RAG 检索片段；未命中时给降级策略
+  memory     →  本轮工具调用返回结果（仅 single 模式有；react 走循环内 ToolMessage）
+  plan       →  （仅 react + enable_planning）由 agent_react 追加的既定执行方案
 """
 
 from __future__ import annotations
@@ -42,98 +45,78 @@ PLAN_SYSTEM = """\
 - 只输出方案本身，不要给出最终答案，不要寒暄或解释
 - 简明扼要，整体控制在 200 字以内
 
-下面是当前可用的知识领域、工具，以及已预检索到的资料，供你规划时参考：
+下面是当前可用的能力与已预检索资料（key:value 分段），供你规划时参考：
 
-【可咨询的知识领域 / Skill】
+knowledge:
 {skill_table}
 
-【可调用的工具 / Tools】
+tools:
 {tool_table}
 
-【已预检索片段】
+workspace:
 {context}\
 """
 
-# 注入 agent_react 系统提示的执行方案前缀
+# 注入 agent_react 系统提示的执行方案前缀（作为 plan: 段追加到 system prompt 末尾）
 PLAN_INJECT_PREFIX = """\
 
 
-──── 既定执行方案 ────
+plan:
 请严格按以下已制定的方案逐步执行（按需调用工具/检索），不要重新规划；若执行中发现方案不适用可微调，但应朝着完成用户需求推进：
 """
 
 
-# ─── 生成节点模板（内部用，不对外暴露） ──────────────────────────────────────
+# ─── 生成节点：key:value 分段系统提示 ─────────────────────────────────────────
+# system prompt 按命名段组织（identity / knowledge / tools / workspace / memory），
+# 每段渲染为 "<key>:\n<内容>"，段间以空行分隔，便于模型定位与人工排查。
 
-# 情形 1：skill 命中 + RAG 有结果 → skill body 作为角色定位，片段补充细节
-_TMPL_SKILL_WITH_HITS = """\
-{skill_body}
-
-──── 检索片段 ────
-{context}
-──── 片段结束 ────\
+# identity：未命中 skill 时的通用角色 + 行为原则；命中 skill 时由 skill body 充当 identity。
+_IDENTITY_GENERIC = """\
+你是一位专业的政策顾问助手，基于 workspace 段的检索片段与对话历史回答用户问题。
+行为原则：
+- 先结论后依据：先给出明确结论，再列出条文或依据
+- 数字直接引用：金额、日期、比例等直接引用原文，不估算
+- 边界清晰：无法确认的信息如实告知，建议查阅官方渠道
+- 不编造数据、条款或具体事实\
 """
 
-# 情形 2：skill 命中 + RAG 无结果 → 保留 skill 角色，但提示知识库未命中
-_TMPL_SKILL_NO_HITS = """\
-{skill_body}
-
-> 注：本次知识库检索未命中相关片段。请结合对话历史和通用知识回答；涉及具体政策条款数字，\
-建议用户以官方最新发布为准。\
+# knowledge：可咨询的知识领域（L1 Skill 表，常驻）
+_KNOWLEDGE_BODY = """\
+以下是你可咨询的知识领域（Skill）。当用户问题匹配某领域时，参考其专长作答：
+{skill_table}\
 """
 
-# 情形 3：无 skill + RAG 有结果 → 通用顾问角色，片段（能力清单由统一块追加）
-_TMPL_GENERIC_WITH_HITS = """\
-# 角色设定
-你是一位专业的政策顾问助手。请基于检索片段回答用户问题。
-
-# 行为原则
-- **先结论后依据**：先给出明确结论，再列出条文或依据
-- **数字直接引用**：金额、日期、比例等直接引用原文，不估算
-- **边界清晰**：无法确认的信息如实告知，建议查阅官方渠道
-
-──── 检索片段 ────
-{context}
-──── 片段结束 ────\
+# tools：可调用工具清单 + 调用约定（常驻）
+_TOOLS_BODY = """\
+以下是你可调用的工具。当用户需求匹配某工具用途时，按其参数要求调用：
+{tool_table}
+对于生成可下载文件的工具（如 generate_word_document），系统会自动在你的回答下方显示「下载」按钮，\
+因此你**不要自行编造、改写、猜测或重复粘贴下载链接**；工具调用成功后，只需简要告知用户\
+「文档已生成，请点击下方按钮下载」即可。\
 """
 
-# 情形 4：无 skill + RAG 无结果 → 降级兜底（能力清单由统一块追加，引导用户聚焦）
-_TMPL_GENERIC_NO_HITS = """\
-# 角色设定
-你是一位专业的政策顾问助手。本次知识库检索未找到直接相关内容。
-
-# 处理策略
-1. 优先参考历史对话上下文回答
-2. 若有部分相关信息，给出参考性解读并提示以官方发布为准
-3. 若完全无法回答，告知用户并建议查阅官网或联系主管部门；可引导用户就下方"可咨询的知识领域"提问
+# workspace：本轮检索到的资料片段；未命中时给降级策略
+_WORKSPACE_NO_HITS = """\
+本次知识库检索未命中相关片段。处理策略：
+1. 优先参考对话历史上下文回答
+2. 若有部分相关信息，给出参考性解读，并提示以官方最新发布为准
+3. 若完全无法回答，告知用户并建议查阅官网或联系主管部门；可引导用户就 knowledge 段所列领域提问
 4. 不编造数据、条款或具体事实\
 """
 
-# 系统可用能力块（所有情形常驻追加）：skill_list + tool_list
-CAPABILITIES_PREFIX = """\
-
-
-──── 系统可用能力 ────
-【可咨询的知识领域 / Skill】
-{skill_table}
-
-【可调用的工具 / Tools】
-{tool_table}
-当用户需求匹配某个工具用途时，按其参数要求调用。对于生成可下载文件的工具（如 generate_word_document），\
-系统会自动在你的回答下方显示「下载」按钮，因此你**不要自行编造、改写、猜测或重复粘贴下载链接**；\
-工具调用成功后，只需简要告知用户「文档已生成，请点击下方按钮下载」即可。\
-"""
-
-# 工具结果追加前缀
-TOOL_RESULTS_PREFIX = """\
-
-
-──── 工具查询结果 ────
+# memory：本轮通过工具获取的信息（仅 single 模式；react 走循环内 ToolMessage）
+_MEMORY_BODY = """\
 以下是本轮工具调用返回的内容（可能包含政策文件原文、当前时间等），请优先依据这些内容回答用户：
+{tool_results}\
 """
 
 
-# ─── 组装函数（供 generate_node 调用） ───────────────────────────────────────
+# ─── 组装函数（供 generate_node / agent_react_node 调用） ─────────────────────
+
+def _section(key: str, body: str) -> str:
+    """渲染一个 key:value 段：键名 + 冒号换行 + 去除首尾空白的内容。"""
+    return f"{key}:\n{body.strip()}"
+
 
 def build_generate_system(
     skill_prompt: str,
@@ -143,35 +126,31 @@ def build_generate_system(
     has_hits: bool,
     tool_table: str = "",
 ) -> str:
-    """根据当前运行状态组装 generate 节点的 system prompt。
+    """组装 generate 节点的 system prompt，输出 key:value 分段结构。
+
+    段顺序：identity → knowledge → tools → workspace →（memory，仅当有工具结果）。
 
     Args:
-        skill_prompt:  detect_skill() 命中后的 L2 系统提示；未命中时为空串。
-        context:       RAG 命中片段格式化后的文本。
-        tool_results:  call_tools_node 执行结果；无工具调用时为空串。
-        skill_table:   L1 Skill 注册表（Markdown 表格）；从 skill_loader 获取。
-        has_hits:      RAG 检索是否有高于阈值的命中片段。
-        tool_table:    内置工具清单（Markdown 表格）；从 builtin_tools.build_tool_table 获取。
+        skill_prompt:  detect_skill() 命中后的 L2 提示；命中时作 identity，未命中用通用角色。
+        context:       RAG 命中片段格式化文本，填入 workspace 段。
+        tool_results:  call_tools_node 执行结果；非空时追加 memory 段。
+        skill_table:   L1 Skill 注册表（Markdown），填入 knowledge 段。
+        has_hits:      RAG 是否有高于阈值的命中片段。
+        tool_table:    内置工具清单（Markdown），填入 tools 段。
 
     Returns:
-        完整的 system prompt 字符串。组装顺序：角色/片段 → 系统可用能力（skill+tool）→ 工具结果。
+        完整的 system prompt 字符串。
     """
     _skill_table = skill_table or "（暂无已加载的知识领域）"
     _tool_table = tool_table or "（暂无可用工具）"
 
-    if skill_prompt and has_hits:
-        base = _TMPL_SKILL_WITH_HITS.format(skill_body=skill_prompt, context=context)
-    elif skill_prompt and not has_hits:
-        base = _TMPL_SKILL_NO_HITS.format(skill_body=skill_prompt)
-    elif not skill_prompt and has_hits:
-        base = _TMPL_GENERIC_WITH_HITS.format(context=context)
-    else:
-        base = _TMPL_GENERIC_NO_HITS
-
-    # 所有情形常驻追加「系统可用能力」块（skill_list + tool_list）
-    base += CAPABILITIES_PREFIX.format(skill_table=_skill_table, tool_table=_tool_table)
-
+    sections = [
+        _section("identity", skill_prompt.strip() if skill_prompt else _IDENTITY_GENERIC),
+        _section("knowledge", _KNOWLEDGE_BODY.format(skill_table=_skill_table)),
+        _section("tools", _TOOLS_BODY.format(tool_table=_tool_table)),
+        _section("workspace", context.strip() if has_hits else _WORKSPACE_NO_HITS),
+    ]
     if tool_results:
-        base += TOOL_RESULTS_PREFIX + tool_results
+        sections.append(_section("memory", _MEMORY_BODY.format(tool_results=tool_results.strip())))
 
-    return base
+    return "\n\n".join(sections)

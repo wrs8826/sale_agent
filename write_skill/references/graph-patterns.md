@@ -73,15 +73,16 @@ for event in build_qa_graph().stream(state, stream_mode="custom"):
 
 ## generate 系统提示组装（`prompts.py: build_generate_system`）
 
-`generate_node` 调 `build_generate_system(skill_prompt, context, tool_results, skill_table, has_hits, tool_table)` 组装 system prompt，顺序：
+`generate_node` / `agent_react_node` 调 `build_generate_system(skill_prompt, context, tool_results, skill_table, has_hits, tool_table)` 组装 system prompt。**采用 key:value 分段结构**：每段渲染为 `<key>:\n<内容>`（由 `_section()` 生成），段间空行分隔。段顺序与来源：
 
-1. **角色/片段层**：按 (是否命中 skill) × (RAG 是否命中) 四情形选模板。
-2. **系统可用能力块（常驻，所有情形都注入）**：`CAPABILITIES_PREFIX` 拼入
-   - `skill_table` —— `skill_loader.build_skill_table()`（L1 知识领域表，从 state 传入）
-   - `tool_table` —— `builtin_tools.build_tool_table()`（内置工具清单，`generate_node` 内 lazy import 获取）
-3. **工具结果层**：若 `tool_results` 非空，追加 `TOOL_RESULTS_PREFIX` + 结果。
+1. **`identity`**：命中 skill 时用 `skill_prompt`（L2 body）作角色；未命中用 `_IDENTITY_GENERIC`（通用政策顾问 + 行为原则）。
+2. **`knowledge`**（常驻）：`skill_table` —— `skill_loader.build_skill_table()`（L1 知识领域表，从 state 传入）。
+3. **`tools`**（常驻）：`tool_table` —— `builtin_tools.build_tool_table()`（`generate_node` 内 lazy import）+ 下载按钮等调用约定。
+4. **`workspace`**：`has_hits` 时填入 `context`（RAG 片段）；否则填降级策略 `_WORKSPACE_NO_HITS`。
+5. **`memory`**（条件）：`tool_results` 非空时追加（single 模式；react 走循环内 ToolMessage，故 react 传空 → 无此段）。
+6. **`plan`**（条件，仅 react + enable_planning）：`agent_react_node` 把 `state['plan']` 经 `PLAN_INJECT_PREFIX`（已是 `plan:` 段）追加到末尾。
 
-> 加新内置工具会自动出现在 tool_table，无需改提示词；新增 skill 自动进 skill_table。两张表都不进 `call_tools_node`（那里靠 `bind_tools` 暴露工具），只进 generate 的 system prompt。
+> 加新内置工具会自动出现在 `tools` 段，无需改提示词；新增 skill 自动进 `knowledge` 段。两张表都不进 `call_tools_node`（那里靠 `bind_tools` 暴露工具），只进 generate 的 system prompt。改段名/新增段时，`prompts.py` 的模块 docstring 也要同步。
 
 ## 节点推自定义事件的方式
 
@@ -157,9 +158,10 @@ def extract_keywords_node(state):
    ```
 4. 不需要改 `call_tools_node` / `generate_node`：两者都按 `state.get("web_tools")` 选 `WEB_TOOLS`/`BUILTIN_TOOLS`，自动 `bind_tools` 并把清单注入 `build_tool_table(tools)`。
 5. 要给**飞书 MCP 路径**也用 → 还需在 `builtin_mcp_server.py` 加 `@mcp_server.tool()` 转发（仅网页端工具**不要**转发）。
-6. 工具结果会通过 `TOOL_RESULTS_PREFIX` 拼入 generate_node 的 system prompt，格式：
+6. 工具结果会作为 `memory:` 段拼入 generate_node 的 system prompt，格式：
    ```
-   ──── 工具查询结果 ────
+   memory:
+   以下是本轮工具调用返回的内容…：
    <tool_name>: <result_text>
    ```
 

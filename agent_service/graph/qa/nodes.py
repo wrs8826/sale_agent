@@ -10,6 +10,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.config import get_stream_writer
 
+from agent_service.logging_config import get_logger
+
 from ..state import ChatState
 from .prompts import (
     EXTRACT_SYSTEM,
@@ -17,6 +19,8 @@ from .prompts import (
     PLAN_SYSTEM,
     build_generate_system,
 )
+
+log = get_logger(__name__)
 
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
@@ -100,7 +104,7 @@ def call_tools_node(state: ChatState) -> ChatState:
     try:
         response = llm.invoke(tool_msgs)
     except Exception as exc:
-        print(f"[call_tools] 工具检测异常: {exc}")
+        log.warning("[call_tools] 工具检测异常: %s", exc)
         return {"tool_results": None}
 
     if not getattr(response, "tool_calls", None):
@@ -167,9 +171,10 @@ def retrieve_node(state: ChatState) -> ChatState:
         try:
             hits = rag_fn(keywords, top_k) or []
         except Exception as exc:
-            print(f"[QA] RAG 检索异常: {exc}")
+            log.warning("[QA] RAG 检索异常: %s", exc)
             hits = []
 
+    log.info("RAG 检索完成：关键词=%r，命中 %d 个分块", keywords, len(hits))
     writer({"type": "tool_end", "name": "检索知识库", "count": len(hits)})
     return {"hits": hits}
 

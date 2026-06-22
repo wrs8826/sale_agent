@@ -35,6 +35,7 @@ F:/销售agent/
 |---|---|
 | `__init__.py` | 暴露绝对路径常量：`CONFIG_PATH` / `DOCS_DIR` / `WIKI_DIR` / `CHROMA_DIR` / `CONVERSATIONS_DIR` / `SKILLS_ROOT` / `DOWNLOADS_DIR` / `POLICY_STAGING_DIR` / `POLICY_DRAFTS_DIR` / `SKILL_BACKUPS_DIR` / `POLICY_SKILL_MAKER` |
 | `skill_loader.py` | 解析 `skills/*/SKILL.md`；`detect_skill(query)` 关键词匹配；`all_refs_dirs()` 返回所有 references 目录 |
+| `logging_config.py` | 集中式控制台日志：`setup_logging()`（`create_app` 最先调，幂等）+ `get_logger(__name__)`。级别 = env `LOG_LEVEL` > config `log_level` > INFO；DEBUG 时放开三方库日志。新代码用 `get_logger` 而非 `print()` |
 | `config.yaml` | 配置入口；分块/检索参数 + chat/cleaner/reranker/embedding 四段 API 配置 + source_weights |
 | `security.py` | Fernet 加密 API key（密钥落 `.secret_key`） |
 | `rag/simple_rag.py` | `DocumentChunker` / `EmbedderFactory` / `HybridRetriever` / `DashScopeReranker` / `RAGConfig` |

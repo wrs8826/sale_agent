@@ -1,4 +1,6 @@
+import hashlib
 import json
+import pickle
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +19,20 @@ try:
     from sentence_transformers import SentenceTransformer
 except ImportError:  # pragma: no cover
     SentenceTransformer = None
+
+# 中文分词：BM25 词项检索需要把连续中文切成词，否则整段中文会被当成单个 token。
+# jieba 缺失时回退到正则分词（降级，中文召回会变差），不影响启动。
+try:
+    import jieba
+
+    jieba.setLogLevel("ERROR")
+    JIEBA_AVAILABLE = True
+except Exception:  # pragma: no cover
+    JIEBA_AVAILABLE = False
+
+from agent_service.logging_config import get_logger
+
+log = get_logger(__name__)
 
 # 新版 OpenAI 客户端
 try:
@@ -67,7 +83,7 @@ class RAGConfig:
     # config.yaml 顶层有意存在、但不属于 RAG 配置的编排开关：
     # 由 api/services 的专用读取器（get_agent_mode / get_plan_first）直接读原始 yaml 消费，
     # 不进 RAGConfig。列入白名单后 from_dict 不再对它们打"未知字段"警告。
-    _NON_RAG_KEYS = frozenset({"agent_mode", "enable_planning"})
+    _NON_RAG_KEYS = frozenset({"agent_mode", "enable_planning", "log_level"})
 
     @classmethod
     def from_dict(cls, data: Dict) -> "RAGConfig":
@@ -76,7 +92,7 @@ class RAGConfig:
         known = {f.name for f in fields(cls)}
         unknown = set(data) - known - cls._NON_RAG_KEYS
         if unknown:
-            print(f"警告: config 中存在未知字段，将被忽略: {sorted(unknown)}")
+            log.warning("config 中存在未知字段，将被忽略: %s", sorted(unknown))
         data = {k: v for k, v in data.items() if k in known}
 
         if "allowed_extensions" in data and isinstance(data["allowed_extensions"], list):
@@ -357,7 +373,7 @@ class OpenAIEmbedder(BaseEmbedder):
             except Exception as e:
                 if attempt == self.retries:
                     raise
-                print(f"OpenAI embed batch failed (attempt {attempt}), retrying in {attempt}s: {e}")
+                log.warning("OpenAI embed batch 失败 (第 %d 次)，%ds 后重试: %s", attempt, attempt, e)
                 time.sleep(attempt)
         return []  # never reached
 
@@ -406,7 +422,7 @@ class DashScopeEmbedder(BaseEmbedder):
             except Exception as e:
                 if attempt == self.retries:
                     raise
-                print(f"DashScope embed batch failed (attempt {attempt}), retrying in {attempt}s: {e}")
+                log.warning("DashScope embed batch 失败 (第 %d 次)，%ds 后重试: %s", attempt, attempt, e)
                 time.sleep(attempt)
         return []
 
@@ -476,7 +492,7 @@ class DashScopeReranker:
             except Exception as e:
                 last_err = e
                 if attempt < self.retries:
-                    print(f"Reranker 请求失败 (attempt {attempt}), retrying: {e}")
+                    log.warning("Reranker 请求失败 (第 %d 次)，重试: %s", attempt, e)
                     time.sleep(attempt)
         raise last_err
 
@@ -515,7 +531,12 @@ class BM25Retriever:
 
     @staticmethod
     def _tokenize(text: str) -> List[str]:
-        return re.findall(r"\w+", text.lower())
+        text = text.lower()
+        if JIEBA_AVAILABLE:
+            # jieba 切词后只保留含字母/数字/中日韩字符的 token，丢弃标点与空白。
+            return [t for t in jieba.lcut(text) if t.strip() and re.search(r"\w", t)]
+        # 回退：正则分词。注意 \w+ 会把连续中文整段当成一个 token，中文 BM25 召回会退化。
+        return re.findall(r"\w+", text)
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Dict]:
         tokens = self._tokenize(query)
@@ -594,6 +615,87 @@ class ChromaVectorStore:
         return hits
 
 
+def _make_normalizer(scores: List[float]):
+    """返回一个把分数 min-max 归一化到 [0,1] 的函数。
+
+    - 空列表 → 恒返回 0.0（该路无候选，不贡献分数）。
+    - 全部相等 / 单候选 → 恒返回 1.0（同列内并列最优），避免除零。
+    """
+    if not scores:
+        return lambda s: 0.0
+    lo, hi = min(scores), max(scores)
+    span = hi - lo
+    if span <= 1e-12:
+        return lambda s: 1.0
+    return lambda s: (s - lo) / span
+
+
+# ── 嵌入持久缓存（按 chunk 内容哈希）────────────────────────────────────────────
+# 目的：文件增删时只对新增/变更的 chunk 调用 embedding API，未变 chunk 复用缓存向量，
+# 避免每次重建索引都全量重算 embedding（API 嵌入器下成本/延迟随文档数线性增长）。
+def _chunk_key(model_key: str, text: str) -> str:
+    return hashlib.sha256(f"{model_key}\x00{text}".encode("utf-8")).hexdigest()
+
+
+def _embedding_cache_path(persist_directory: Union[str, Path]) -> Path:
+    return Path(persist_directory) / "embedding_cache.pkl"
+
+
+def _load_embedding_cache(path: Path) -> Dict[str, List[float]]:
+    if path.exists():
+        try:
+            with path.open("rb") as reader:
+                data = pickle.load(reader)
+            if isinstance(data, dict):
+                return data
+        except Exception as exc:  # 缓存损坏不致命，丢弃即可
+            log.warning("嵌入缓存读取失败，忽略并重建: %s", exc)
+    return {}
+
+
+def _save_embedding_cache(path: Path, cache: Dict[str, List[float]]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        with tmp.open("wb") as writer:
+            pickle.dump(cache, writer)
+        tmp.replace(path)  # 原子替换，避免半写文件
+    except Exception as exc:
+        log.warning("嵌入缓存写入失败，忽略: %s", exc)
+
+
+def _embed_documents_cached(
+    embedder: BaseEmbedder,
+    documents: List[str],
+    model_key: str,
+    persist_directory: Union[str, Path],
+) -> List[List[float]]:
+    """带持久缓存的批量嵌入：只对缓存未命中的 chunk 调用 embedder，命中则复用。
+
+    缓存按 (model_key + chunk 文本) 哈希为键；写回时只保留当前语料的键，防止无限增长。
+    仅对“按单块文本确定”的嵌入器有效（API / SentenceTransformer），调用方负责门控。
+    """
+    cache_path = _embedding_cache_path(persist_directory)
+    cache = _load_embedding_cache(cache_path)
+
+    keys = [_chunk_key(model_key, d) for d in documents]
+    missing_idx = [i for i, k in enumerate(keys) if k not in cache]
+    log.debug(
+        "嵌入缓存: 共 %d 块，命中 %d，新嵌入 %d (model_key=%s)",
+        len(keys), len(keys) - len(missing_idx), len(missing_idx), model_key,
+    )
+
+    if missing_idx:
+        new_vecs = embedder.embed_documents([documents[i] for i in missing_idx])
+        for i, vec in zip(missing_idx, new_vecs):
+            cache[keys[i]] = vec
+
+    embeddings = [cache[k] for k in keys]
+    # 只保留本次语料用到的键（自然淘汰已删除/已变更的旧 chunk 向量）
+    _save_embedding_cache(cache_path, {k: cache[k] for k in keys})
+    return embeddings
+
+
 class HybridRetriever:
     """混合检索器：BM25 + 向量检索。"""
 
@@ -613,10 +715,10 @@ class HybridRetriever:
             self.embedder = EmbedderFactory.create(self.config)
             if not isinstance(self.embedder, SentenceTransformerEmbedder):
                 self.embedder.fit(documents)
-            embeddings = self.embedder.embed_documents(documents)
+            embeddings = self._embed_documents(documents)
             self.vector_store = ChromaVectorStore(documents, embeddings, self.metadatas, config=self.config)
         except Exception as e:
-            print(f"主嵌入器失败: {e}\n回退到 SimpleEmbedder 并重建向量存储。")
+            log.warning("主嵌入器失败，回退到 SimpleEmbedder 并重建向量存储: %s", e)
             fallback = SimpleEmbedder()
             fallback.fit(documents)
             embeddings = fallback.embed_documents(documents)
@@ -624,6 +726,25 @@ class HybridRetriever:
             # ChromaVectorStore 现在总是按当前文档重建集合，
             # 因此回退时无需再手动切换 reset_vector_store，旧的错误维度集合会被自动覆盖。
             self.vector_store = ChromaVectorStore(documents, embeddings, self.metadatas, config=self.config)
+
+    def _embed_documents(self, documents: List[str]) -> List[List[float]]:
+        """嵌入全部文档；对“按单块文本确定”的嵌入器走持久缓存以避免全量重算。
+
+        TF-IDF(SimpleEmbedder) 的向量依赖整个语料统计（fit），同一段文本在不同语料下
+        向量不同，**不可**按单块缓存，故直接全量嵌入（且其本地计算成本低）。
+        """
+        embedder = self.embedder
+        cacheable = isinstance(
+            embedder, (OpenAIEmbedder, DashScopeEmbedder, SentenceTransformerEmbedder)
+        )
+        if not cacheable:
+            return embedder.embed_documents(documents)
+        # model_key 含嵌入器类型 + 模型名：换模型自然全部 miss → 用新模型重嵌（维度变化由
+        # ChromaVectorStore 每次重建集合兜底，不会残留旧维度）。
+        model_key = f"{type(embedder).__name__}:{self.config.embedder_name}"
+        return _embed_documents_cached(
+            embedder, documents, model_key, self.config.persist_directory
+        )
 
     def search(
         self,
@@ -649,18 +770,28 @@ class HybridRetriever:
             bm25_hits = bm25_future.result()
             vector_hits = vector_future.result()
 
+        # BM25 分数无上界，向量分数 ∈ (0,1]，量纲不同；直接加权会让 BM25 量级压倒向量、
+        # bm25_weight 名不副实。先把两路分数各自 min-max 归一化到 [0,1] 再加权融合，
+        # 使 hybrid_score 落在 [0,1]（与 score_threshold 门控语义兼容）。
+        norm_bm25 = _make_normalizer([h["score"] for h in bm25_hits])
+        norm_vec = _make_normalizer([h["score"] for h in vector_hits])
+
         combined_scores: Dict[int, Dict] = {}
         for hit in bm25_hits:
+            nb = norm_bm25(hit["score"])
             combined_scores[hit["doc_id"]] = {
                 "doc_id": hit["doc_id"],
                 "text": hit["text"],
                 "metadata": self.metadatas[hit["doc_id"]],
                 "bm25_score": hit["score"],
                 "vector_score": 0.0,
-                "hybrid_score": hit["score"] * bm25_weight,
+                "bm25_norm": nb,
+                "vector_norm": 0.0,
+                "hybrid_score": nb * bm25_weight,
             }
 
         for hit in vector_hits:
+            nv = norm_vec(hit["score"])
             entry = combined_scores.get(hit["doc_id"])
             if entry is None:
                 entry = {
@@ -669,12 +800,15 @@ class HybridRetriever:
                     "metadata": hit.get("metadata", self.metadatas[hit["doc_id"]]),
                     "bm25_score": 0.0,
                     "vector_score": hit["score"],
-                    "hybrid_score": hit["score"] * (1 - bm25_weight),
+                    "bm25_norm": 0.0,
+                    "vector_norm": nv,
+                    "hybrid_score": nv * (1 - bm25_weight),
                 }
                 combined_scores[hit["doc_id"]] = entry
             else:
                 entry["vector_score"] = hit["score"]
-                entry["hybrid_score"] += hit["score"] * (1 - bm25_weight)
+                entry["vector_norm"] = nv
+                entry["hybrid_score"] += nv * (1 - bm25_weight)
 
         # 将所有候选按混合分排序；若启用重排序则送入 reranker，否则截取 top_k
         all_candidates = sorted(combined_scores.values(), key=lambda x: x["hybrid_score"], reverse=True)

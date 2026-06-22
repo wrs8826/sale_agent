@@ -22,6 +22,9 @@ from agent_service.rag import (
     build_simple_rag,
 )
 from agent_service.security import decrypt, encrypt, mask
+from agent_service.logging_config import get_logger
+
+log = get_logger(__name__)
 
 # ── 数据源权重兜底默认 ────────────────────────────────────────────────────────
 _DEFAULT_SOURCE_WEIGHTS = {"docs": 1.0, "wiki": 0.7, "skill": 1.0}
@@ -65,7 +68,7 @@ def current_source_weights() -> dict:
     try:
         cfg = load_config()
     except Exception as exc:
-        print(f"[services] 读取 source_weights 失败，使用默认: {exc}")
+        log.warning("读取 source_weights 失败，使用默认: %s", exc)
         return dict(_DEFAULT_SOURCE_WEIGHTS)
     weights = dict(_DEFAULT_SOURCE_WEIGHTS)
     if cfg.source_weights:
@@ -365,7 +368,7 @@ def _rebuild_rag(
         try:
             docs, metas = DocumentLoader.load(root, config=cfg)
         except Exception as exc:
-            print(f"[services] 加载 {source_type} 目录失败: {exc}")
+            log.warning("加载 %s 目录失败: %s", source_type, exc)
             continue
         for m in metas:
             m["source_type"] = source_type
@@ -379,7 +382,7 @@ def _rebuild_rag(
         try:
             docs, metas = DocumentLoader.load(refs_dir, config=cfg)
         except Exception as exc:
-            print(f"[services] 加载 skill refs {refs_dir} 失败: {exc}")
+            log.warning("加载 skill refs %s 失败: %s", refs_dir, exc)
             continue
         for m in metas:
             m["source_type"] = "skill"
@@ -387,9 +390,14 @@ def _rebuild_rag(
         all_metas.extend(metas)
 
     if not all_docs:
+        log.info("RAG 重建跳过：未加载到任何文档")
         _rag, _rag_build_key = None, ()
         return None, False
 
+    log.info(
+        "重建 RAG 索引：%d 个分块（chunk_size=%s, overlap=%s）",
+        len(all_docs), chunk_size, chunk_overlap,
+    )
     _rag = build_simple_rag(all_docs, all_metas, config=cfg)
     _rag_build_key = key
     return _rag, True

@@ -19,6 +19,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from flask import Flask, redirect, send_from_directory, session
 
 from agent_service import CONVERSATIONS_DIR, DOCS_DIR, WIKI_DIR
+from agent_service.logging_config import setup_logging, get_logger
 from api.session_store import configure_session
 from api.conv_stats import ensure_table as ensure_stats_table
 from api.agent import bp as agent_bp
@@ -38,6 +39,9 @@ ADMIN_DIST = _PROJECT_ROOT / "web-admin" / "dist"
 
 
 def create_app() -> Flask:
+    setup_logging()   # 最先初始化日志，级别由 config.yaml log_level / 环境变量 LOG_LEVEL 控制
+    get_logger(__name__).info("管理员端启动中…")
+
     app = Flask(__name__, static_folder=None)
     app.config["IS_ADMIN_APP"] = True
     app.secret_key = os.getenv("ADMIN_SECRET_KEY", "admin-app-secret-key-change-in-prod")

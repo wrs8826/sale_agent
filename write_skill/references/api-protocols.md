@@ -102,7 +102,7 @@
 需 admin 角色 session。返回：
 ```json
 { "users": [{ "id": 1, "username": "...", "phone": "...", "department": "...",
-  "has_custom_settings": true, "chat_model": "qwen3-max",
+  "has_custom_settings": true, "chat_model": "deepseek-v4-pro",
   "is_banned": false, "created_at": "2026-01-01 12:00" }] }
 ```
 - `has_custom_settings`：用户是否配置了专属模型

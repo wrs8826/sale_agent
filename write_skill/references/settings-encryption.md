@@ -6,9 +6,10 @@
 
 ```yaml
 chat:
-  api_key: "enc:gAAAAAB..."     # Fernet 密文，带 enc: 前缀
-  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  model_name: "qwen3-max"
+  api_key: "enc:gAAAAAB..."     # Fernet 密文，带 enc: 前缀（当前部署为空，回退顶层 legacy api_key）
+  base_url: "https://api.deepseek.com"
+  model_name: "deepseek-v4-pro"
+  rag_score_threshold: 0.3       # RAG 命中分数门限；由 services.load_rag_threshold() 读取，低于该值回退会话上下文作答
 
 cleaner:
   api_key: ""                    # 空 = 继承 chat
@@ -16,14 +17,14 @@ cleaner:
   model_name: ""
 
 reranker:
-  api_key: ""
-  base_url: ""
+  api_key: "enc:..."             # 当前部署用 DashScope，已加密
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   model_name: "gte-rerank-v2"
 
 embedding:
-  api_key: ""
-  base_url: ""
-  model_name: "BAAI/bge-large-zh-v1.5"  # 本地 sentence-transformers 模型名
+  api_key: "enc:..."             # 当前部署用 DashScope 在线 embedding，已加密
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model_name: "text-embedding-v4"  # DashScope 在线模型（配合顶层 api_provider: openai）
 
 storage:
   wiki_dir: ""                   # 留空使用默认 agent_service/wiki/；不加密，普通字符串
@@ -34,7 +35,8 @@ storage:
 - cleaner 任一字段为空 → 取 chat 同名字段
 - reranker 任一字段为空 → 取 chat 的 `api_key` / `base_url`；`model_name` 默认 `gte-rerank-v2`
 - embedding 任一字段为空 → 取 chat 的 `api_key` / `base_url`；`model_name` 默认 `BAAI/bge-large-zh-v1.5`
-- 当前部署使用本地 sentence-transformers 模型（`api_provider: null`），不调用外部 embedding API；`embedding.api_key`/`base_url` 留空即可
+- **当前部署用的是 DashScope 在线 embedding**（`config.yaml` 顶层 `api_provider: openai` + `embedding` 段填了 DashScope 的 `api_key`/`base_url` + `model_name: text-embedding-v4`），**不是**本地 sentence-transformers。
+- 若要切回本地 sentence-transformers：把顶层 `api_provider` 置为 `null`、`embedding.api_key`/`base_url` 留空、`model_name` 用本地模型名（如 `BAAI/bge-large-zh-v1.5`）。两种模式维度不同，切换后必须重建向量库（见 `common-pitfalls.md` #2）。
 
 实现：`api/services.py:load_cleaner_settings()` / `load_reranker_settings()` / `load_embedding_settings()`。
 
@@ -119,6 +121,8 @@ mask(plaintext: str) -> str           # "sk-******1234"，给前端显示
 5. 前端 `web/assets/settings.js:SECTIONS` 加新字段渲染（用 `buildField()`）
 6. 前端 `fillForm()` / `saveSettings()` 不用改（自动按 `data-section/data-field` 取所有 input）
 
+> 例外：`chat.rag_score_threshold` 虽写在 `chat:` 段下，但**不走 `load_chat_settings()`**，而是由专用读取器 `services.load_rag_threshold()` 直接读原始 yaml（缺省 0.3）。这类"挂在某段下、却由专用 reader 消费"的字段，加的时候照它的模式（写 reader + 消费处调 reader），别指望 `load_chat_settings()` 自动带出来。
+
 ### 场景 1.5：加一个"非 RAG 的顶层编排开关"（如 `agent_mode` / `enable_planning`）
 
 这类开关写在 `config.yaml` 顶层，但**不属于 RAG 配置**，由 `api/services.py` 的专用读取器直接读原始 yaml 消费（`get_agent_mode()` / `get_plan_first()`，内部走 `_read_raw_yaml()`，**绕过 `RAGConfig`**，因此每请求热生效、无需重启）。
@@ -127,7 +131,7 @@ mask(plaintext: str) -> str           # "sk-******1234"，给前端显示
 
 ```python
 # agent_service/rag/simple_rag.py
-_NON_RAG_KEYS = frozenset({"agent_mode", "enable_planning"})   # 无类型注解 → 不会被当成 dataclass 字段
+_NON_RAG_KEYS = frozenset({"agent_mode", "enable_planning", "log_level"})   # 无类型注解 → 不会被当成 dataclass 字段
 # from_dict 里：unknown = set(data) - known - cls._NON_RAG_KEYS
 ```
 

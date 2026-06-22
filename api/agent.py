@@ -178,8 +178,24 @@ def agent_chat():
         cur = services.get_current_rag()
         if cur is None:
             return []
+        # reranker 可选：已配置则启用，未配置 / 初始化失败时降级为纯混合检索，不阻断对话。
         try:
-            return cur.search(q, top_k=k)
+            reranker = services.get_reranker()
+        except Exception:
+            reranker = None
+        use_reranker = reranker is not None
+        try:
+            # 召回阶段放宽候选池（与 /query 一致），交给 reranker / 来源加权排序后再截到 k。
+            fetch_k = max(k, cfg.bm25_k, cfg.vector_k)
+            hits = cur.search(
+                q,
+                top_k=fetch_k,
+                bm25_k=cfg.bm25_k,
+                vector_k=cfg.vector_k,
+                bm25_weight=cfg.bm25_weight,
+                reranker=reranker,
+            )
+            return services.apply_source_weights(hits, use_reranker=use_reranker)[:k]
         except Exception:
             return []
 
