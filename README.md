@@ -4,7 +4,7 @@
 
 ## 功能概览
 
-- **RAG 问答**：混合检索（BM25 + 向量）+ 可选重排序，支持自定义知识库
+- **RAG 问答**：混合检索（BM25 + 向量）+ 可选重排序，支持自定义知识库；BM25 用 jieba 中文分词、两路分数 min-max 归一化融合、嵌入结果持久缓存（仅对新增/变更分块重算）；命中分数低于 `chat.rag_score_threshold`（默认 0.3）时回退会话上下文作答
 - **流式输出**：Server-Sent Events（SSE）逐 token 推送（`tool_start / tool_end / plan_* / token / download / done / auto_compacted / circuit_break / conversation_saved` 等事件）
 - **多步工具循环（ReAct）**：`agent_mode` feature flag 灰度切换——`single`（单趟一次工具）/ `react`（`create_react_agent` 多步 思考→调工具→观察，网页端最多 15 轮）；网页端与飞书降级共用
 - **先列方案再执行**：`enable_planning` 开关（仅 react 生效）——执行前先产出一份执行方案（任务拆分），以独立「📋 执行方案」卡片流式展示，并作为执行指令注入循环；仅网页端
@@ -17,6 +17,7 @@
 - **管理后台**：用户管理、知识库管理、政策 Skill 更新、参数配置、对话统计（React + TypeScript）
 - **飞书机器人**：WebSocket 长连接，无需公网域名；两个 MCP server（官方飞书工具 + 内置工具）
 - **API Key 加密**：Fernet 对称加密存储，`enc:` 前缀标识密文，前端只看到掩码
+- **集中式日志**：统一 `logging` 输出（时间/级别/模块），级别由 `LOG_LEVEL` 环境变量或 `config.yaml` 的 `log_level` 控制（默认 INFO），DEBUG 时放开三方库日志便于排查
 
 ## 架构
 
@@ -66,7 +67,9 @@ cp agent_service/mcp/lark_mcp.json.example agent_service/mcp/lark_mcp.json
 **`agent_service/config.yaml`** — 主配置（RAG 参数 + LLM API Key）：
 
 ```yaml
-# 嵌入模型 API Key（阿里云百炼 / OpenAI 兼容）
+# 嵌入模型：api_provider 非空 → 走在线 embedding API（OpenAI / 阿里云百炼兼容）；
+# 置为 null 则回退本地 sentence-transformers（embedding 段可留空）
+api_provider: openai
 api_key: "你的API Key"
 api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
@@ -74,6 +77,13 @@ chat:
   api_key: "你的API Key"
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   model_name: "qwen-plus-2025-07-28"
+  rag_score_threshold: 0.3      # 低于此命中分数则回退会话上下文作答
+
+# 在线 embedding 时填写（本地模型则留空）
+embedding:
+  api_key: "你的API Key"
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model_name: "text-embedding-v4"
 ```
 
 **`agent_service/mcp/lark_mcp.json`** — 飞书机器人配置（可选）：
@@ -170,6 +180,7 @@ Content-Type: application/json
 | `ADMIN_SECRET_KEY` | 管理端 Session 密钥（生产务必覆盖） | `admin-app-secret-key-change-in-prod` |
 | `AGENT_MODE` | 对话循环模式：`react`（多步工具循环）/ `single`（单趟） | `single` |
 | `PLAN_FIRST` | 先列执行方案再执行（任务拆分，仅 react 生效）：`1`/`true`/`on` 开启 | `false` |
+| `LOG_LEVEL` | 日志级别：`DEBUG`/`INFO`/`WARNING`/`ERROR`（优先级高于 `config.yaml` 的 `log_level`） | `INFO` |
 | `DB_HOST` | MySQL 地址 | `127.0.0.1` |
 | `DB_PORT` | MySQL 端口 | `3306` |
 | `DB_USER` | MySQL 用户名 | `root` |
@@ -181,7 +192,7 @@ Content-Type: application/json
 
 ## 技术栈
 
-- **后端**：Flask、LangGraph、LangChain、ChromaDB、rank-bm25、sentence-transformers
+- **后端**：Flask、LangGraph、LangChain、ChromaDB、rank-bm25、jieba（中文分词）、sentence-transformers
 - **前端**：vanilla JS（用户端）、React + TypeScript + Tailwind CSS + Vite（管理端）
 - **LLM**：兼容 OpenAI 接口（默认阿里云百炼 Dashscope）
 - **飞书集成**：lark-oapi SDK WebSocket 长连接
