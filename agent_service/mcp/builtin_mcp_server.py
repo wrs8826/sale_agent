@@ -75,17 +75,21 @@ def get_current_time(timezone: str = "Asia/Shanghai") -> str:
 
 @mcp_server.tool()
 def load_policy_file(skill_name: str, filename: str) -> str:
-    """读取指定 skill 的 references 目录中的政策文档文件，返回文件全文。
+    """读取指定 skill 的政策文档文件，返回文件全文。
 
-    适用场景：用户询问某地人才政策的具体细节（申报条件、资金政策、操作流程等），
-    且已通过 SKILL.md 文档地图确定了目标文件时调用。
+    适用场景：用户询问某个人才政策的具体细节（申报条件、资金政策、操作流程等）时，
+    按**你系统提示里已给出的「文档地图」**选定目标文件后调用本工具读取原文。
+    （文档地图已在系统提示中，无需再读 SKILL.md 获取；如确需，传 filename="SKILL.md" 也可读到。）
 
     Args:
-        skill_name: skill 目录名，例如 "甬江人才政策"、"太仓人才政策"。
-        filename:   文件名（含 .md 扩展名），仅传文件名，不含路径前缀。
+        skill_name: skill 目录名，例如 "甬江人才政策"、"太仓人才政策"、
+                    "无锡人才政策"、"成都人才政策"。
+        filename:   文件名（含 .md 扩展名），例如 "申报条件_制造业.md"。
+                    传文档地图里的文件名即可；带不带 "references/" 前缀都行（会自动处理）。
+                    传 "SKILL.md" 可读取该 skill 的索引/文档地图本身。
 
     Returns:
-        文件全文字符串；若文件不存在则返回错误说明。
+        文件全文字符串；若文件不存在则返回错误说明（含可用文件清单）。
     """
     return _load_policy_file.invoke({"skill_name": skill_name, "filename": filename})
 
@@ -112,6 +116,10 @@ def generate_word_document(title: str, sections: List[dict], filename: str = "")
     base = _public_base_url()
     if base and "(/download/" in result:
         result = result.replace("(/download/", f"({base}/download/")
+    # 飞书无下载按钮 UI，需让模型把链接写进回复才能下载——此处显式追加指引。
+    # 网页端不经过本转发层，由系统提示约定「不要粘贴链接、点下方按钮」，二者不冲突。
+    if "/download/" in result:
+        result += "\n请把上面的下载链接原样发给用户，方便其点击下载。"
     return result
 
 

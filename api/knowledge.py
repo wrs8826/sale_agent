@@ -11,7 +11,7 @@ from flask import Blueprint, Response, jsonify, request, send_file, session, str
 from agent_service import CONFIG_PATH, DOCS_DIR, DOWNLOADS_DIR, POLICY_STAGING_DIR
 from agent_service.graph import build_cleaning_graph
 from agent_service.mcp.builtin_tools import extract_text_from_file
-from agent_service.rag import DocumentChunker, EmbedderFactory
+from agent_service.rag import DocumentChunker
 
 from . import services
 
@@ -283,44 +283,25 @@ def ingest():
                 yield f"data: {json.dumps(result, ensure_ascii=False)}\n\n"
                 return
 
-            # Step 3: 嵌入 & 存储
-            msg = f"嵌入并存入向量库（清洗后 {len(cleaned)} 字）..."
+            # Step 3: 落盘清洗文本 + 失效缓存（不再单独写 Chroma）
+            #
+            # 实际的嵌入/索引交给 services.get_rag() 的统一重建（_rebuild_rag，带按 chunk 哈希的
+            # 嵌入缓存）。这里**不再**手动 embed + col.add()——那套写入会被下一次 _rebuild_rag
+            # 的整集合重建覆盖（ChromaVectorStore 每次删集合重建），属无效功。详见
+            # write_skill/references/common-pitfalls 「ingest 写库被重建覆盖」。
+            msg = f"落盘清洗结果并刷新索引（清洗后 {len(cleaned)} 字）..."
             yield f"data: {json.dumps({'type':'storing','message':msg}, ensure_ascii=False)}\n\n"
 
-            chunks = DocumentChunker.chunk(cleaned, cfg.chunk_size, cfg.chunk_overlap)
-            embedder = EmbedderFactory.create(services.cfg_with_embedding(cfg))
-            embeddings = embedder.embed_documents(chunks)
-
-            persist_dir = Path(cfg.persist_directory)
-            if not persist_dir.is_absolute():
-                persist_dir = CONFIG_PATH.parent / persist_dir
-            persist_dir.mkdir(parents=True, exist_ok=True)
-
-            chroma = chromadb.Client(
-                _ChromaSettings(is_persistent=True, persist_directory=str(persist_dir))
-            )
-            names = [c.name for c in chroma.list_collections()]
-            if cfg.collection_name in names:
-                col = chroma.get_collection(cfg.collection_name)
-                offset = col.count()
-            else:
-                col = chroma.create_collection(cfg.collection_name)
-                offset = 0
-
-            col.add(
-                ids=[str(offset + i) for i in range(len(chunks))],
-                documents=chunks,
-                embeddings=embeddings,
-                metadatas=[
-                    {"source": str(target), "chunk_id": i, "filename": filename}
-                    for i in range(len(chunks))
-                ],
-            )
-            services.invalidate_rag()
-
-            # 将清洗后内容覆写原文件（仅纯文本类；PDF/Word 二进制原件保留，供 read_document 读取）
+            # 将清洗后内容覆写原文件（仅纯文本类，loader 下次读到的即清洗文本）；
+            # PDF/Word 二进制原件保留供 read_document，其检索文本由 loader 在重建时结构化提取。
             if target.suffix.lower() not in _BINARY_DOC_EXT:
                 target.write_text(cleaned, encoding="utf-8")
+
+            services.invalidate_rag()
+
+            # chunks_stored 反映「将被索引的分块数」估算（统一重建时以 loader 提取文本为准，
+            # 二进制文档可能与此略有出入；正式文档清洗多为原样透传，二者基本一致）。
+            chunks = DocumentChunker.chunk(cleaned, cfg.chunk_size, cfg.chunk_overlap)
 
             result = {
                 "type": "result",

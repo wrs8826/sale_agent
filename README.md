@@ -12,7 +12,7 @@
 - **确定性文件下载**：生成 Word 后由后端从真实工具结果下发下载链接、前端渲染「下载」按钮，不依赖模型转述链接（避免模型把链接写错/编造）
 - **内置工具**：读取文档（PDF / Word / 文本，`read_document`）、列文件、查政策原文、生成 Word（返回下载链接）、获取时间；网页端独有文档读取，飞书侧不暴露
 - **结构化文档解析**：PDF 用 PyMuPDF 取正文 + pdfplumber 取表格，按页内位置合并去重；Word 读取用 unstructured 结构化（标题→Markdown、表格→管道、含页眉页脚，失败回退 python-docx 且保持段落/表格原始顺序）；Word 生成仍用 python-docx；纯文本自动识别编码（UTF-8/GBK 等，避免中文乱码）
-- **文档读取与上传**：知识库支持 `.txt/.md/.rst/.html/.pdf/.docx`；对话框回形针可直接上传文件让助手读取
+- **文档读取与上传**：知识库支持 `.txt/.md/.rst/.html/.pdf/.docx`，**PDF / Word 同样纳入混合检索**（参与语义召回，而非仅供整篇读取）；对话框回形针可直接上传文件让助手读取
 - **四级对话压缩**：L1 滑动窗口（最近 20 轮）+ L2 工具记录裁剪 + L3 滚动摘要（DeepSeek 分词器精确计数，1M 上下文预算）+ L4 熔断全局强压；工具调用持久化进历史
 - **技能系统**：通过 `skills/` 目录挂载专项技能，关键词路由自动匹配；管理端可上传政策材料 →（开发态 `policy_skill_maker` 方法论）自动生成 skill 草稿 → 人工审核发布
 - **管理后台**：用户管理、知识库管理、政策 Skill 更新、参数配置、对话统计（React + TypeScript）
@@ -184,7 +184,8 @@ Content-Type: application/json
 {"filename": "your_doc.txt"}
 ```
 
-- PDF / Word 经 `extract_text_from_file` 提取文本入库：PDF = PyMuPDF（正文）+ pdfplumber（表格）按位置合并去重；Word = unstructured 结构化（失败回退 python-docx，保段落/表格顺序）；纯文本经 `text_utils.read_text_smart` 自动识别 UTF-8/GBK 等编码。二进制原件保留，供 `read_document` 工具读取整篇内容。
+- PDF / Word 经 `extract_text_from_file` 提取文本后**纳入混合检索索引**（`.pdf/.docx` 已加入 `allowed_extensions`，重建索引时由 `DocumentLoader` 结构化提取，单文件失败仅跳过该文件）：PDF = PyMuPDF（正文）+ pdfplumber（表格）按位置合并去重；Word = unstructured 结构化（失败回退 python-docx，保段落/表格顺序）；纯文本经 `text_utils.read_text_smart` 自动识别 UTF-8/GBK 等编码。二进制原件保留，供 `read_document` 工具读取整篇内容。
+- `/ingest` 负责清洗（聊天记录去噪、纯文本回写）并失效 RAG 缓存；嵌入/索引统一由 `get_rag()` 重建负责（带按分块哈希的嵌入持久缓存），**不再单独写向量库**（避免被下一次整集合重建覆盖的无效写入）。
 - 对话界面的回形针按钮可即时上传文件并让助手读取（复用 `/upload`）。
 - 反馈沉淀的优质回答会自动写入 `agent_service/wiki/`，作为补充知识源（权重可在 `config.yaml` 的 `source_weights` 调节）。
 

@@ -43,6 +43,8 @@ allowed_extensions:
   - ".md"
   - ".rst"
   - ".html"
+  - ".pdf"
+  - ".docx"
 
 # 返回的最终结果数。
 top_k: 5

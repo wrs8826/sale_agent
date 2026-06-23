@@ -429,7 +429,7 @@ def generate_word_document(title: str, sections: list, filename: str = "") -> st
 
     Returns:
         含 Markdown 下载链接的字符串；失败时返回错误说明。
-        请把该下载链接原样呈现给用户。
+        （网页端会自动渲染「下载」按钮，无需重复粘贴链接；飞书端由 MCP 转发层另行追加发链接指引。）
     """
     import re
     import uuid
@@ -488,10 +488,12 @@ def generate_word_document(title: str, sections: list, filename: str = "") -> st
     except Exception as exc:
         return f"生成 Word 文档失败：{exc}"
 
-    return (
-        f"文档已生成。请把以下下载链接原样提供给用户："
-        f"[{base}.docx](/download/{out_name})"
-    )
+    # 仅陈述事实 + 给出真实链接，不命令模型粘贴：
+    #   · 网页端由系统提示统一约定（系统自动渲染下载按钮、模型不要重复粘贴链接，见
+    #     graph/qa/prompts._TOOLS_BODY）——若此处再写「请原样提供链接」会与系统提示冲突；
+    #   · 飞书端无下载按钮 UI，由 builtin_mcp_server 转发层在重写为绝对链接后追加「请把链接发给用户」。
+    # 链接本身（[..](/download/..docx)）保持不变，api 层 _extract_download 仍能抽出并下发 download 事件。
+    return f"文档已生成：[{base}.docx](/download/{out_name})"
 
 
 _READ_MAX_CHARS = 16000  # read_document 注入提示词的文本上限，超出截断

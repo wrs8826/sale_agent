@@ -10,6 +10,21 @@
 
 **触发点**：如果以后加新的"需要 RAG 的"路由，照同样模板。
 
+## 1b. PDF/Word 上传并入库后检索不到 / `/ingest` 写库被重建覆盖（已修）
+
+**症状（修复前）**：上传 `.pdf`/`.docx`、点「清洗入库」显示成功，但语义检索永远召回不到其内容；只有 `read_document` 工具能整篇读到。
+
+**双重根因**：
+1. `/ingest` 的 Step 3 自己 embed + `col.add()` 写进 `simple_rag` 集合，但查询路径 `get_rag()`→`_rebuild_rag()`→`ChromaVectorStore` **每次删集合重建**（从 `DocumentLoader.load(docs/wiki/skill)` 重新读原文件），ingest 的写入在下一次查询就被整段丢弃——纯属无效功。
+2. `DocumentLoader` 只加载 `allowed_extensions`（旧值不含 pdf/docx）且用 `read_text_smart`（按文本编码读，无法解析二进制）。`/ingest` 对 pdf/docx 又刻意不回写原文件，于是二进制内容**永远进不了索引**。
+
+**修复（fix A）**：
+- `allowed_extensions` 加 `.pdf/.docx`（`config.yaml` + `RAGConfig` 默认）；
+- `DocumentLoader.load` 对 `.pdf/.docx` 走 `extract_text_from_file`（延迟导入防循环依赖），单文件失败只跳过；
+- 删掉 `/ingest` 里被覆盖的 embed+Chroma 写入块，索引统一归口 `_rebuild_rag`（带嵌入缓存）。`/ingest` 只保留：清洗 → 纯文本回写 → `invalidate_rag()`。
+
+**遗留权衡**：二进制文档的检索文本是 loader 的**原始提取**（未经 ingest 清洗）。正式公文清洗多为原样透传，影响小；若将来要让二进制也吃清洗结果，需引入 sidecar 清洗文本缓存（见分析备忘）。另：`extract_text_from_file` 在每次重建时对每个 PDF/docx 重跑（嵌入有缓存、提取没有），大量大 PDF 时重建会变慢，可按 mtime 加提取缓存。
+
 ## 2. embedding 模型换了但向量库没清 → 检索 0 命中
 
 **症状**：换 embedding model 后所有 query 都返回空。
@@ -386,6 +401,7 @@ params={"department_id": root, "department_id_type": "open_department_id", ...}
 **四个独立根因（逐层排）**：
 1. **single 模式下工具没被可靠调用** → 文件根本没生成。单趟工具决策对"生成整篇文档"不稳。**切 `agent_mode=react`**（多步循环会真正调 `generate_word_document`）。验证：`agent_service/downloads/`（复数目录）是否出现 `.docx`。
 2. **依赖模型把 `/download/...docx` 链接写进回答 → 不可靠**：实测 DeepSeek 会把链接写错或**编造**成 `https://<部署域名>/<uuid>` 这种（无 `/download/`、无 `.docx`）。**已改为确定性下载**：`api/agent.py` 转发循环里对 `generate_word_document` 的 `tool_end` 用 `_extract_download()` 抽出真实 `/download/...`，下发 `download` 事件；两端据此渲染下载按钮（重载历史时从持久化的 `role=tool` 消息正则抽链接）；提示词也改成"不要自行编造下载链接，系统会显示按钮"。
+   - **提示词与工具返回值不再自相矛盾（已修）**：早期 `generate_word_document` 的**返回串/ docstring 命令模型「请把链接原样提供给用户」**，与系统提示「不要粘贴链接、点下方按钮」直接打架，导致模型有时仍粘一个可能写错的链接。现 `builtin_tools.generate_word_document` 返回**中性**文案（仅 `文档已生成：[..](/download/..docx)`，不含粘贴指令），链接形态不变、`_extract_download` 照常工作。**飞书无下载按钮 UI**，需模型把链接写进回复，故由 `builtin_mcp_server` 转发层在重写为绝对链接后**追加**「请把上面的下载链接原样发给用户」——指令只加在飞书路径，网页端不经过转发层，二者不冲突。改这块时：网页端工具返回保持中性、靠系统提示约定；要让飞书发链接就在转发层加，**别**把粘贴指令塞回共享的 `builtin_tools` 返回值。
 3. **工具轮上限吃满**：若某轮在 `max_tool_rounds` 步内还没轮到 `generate_word_document` 就到顶，这轮就没生成。`api/agent.py` 网页端已放宽到 15。注意：`download` 事件在工具执行完成那刻发出，**不受后续超时/超限影响**——只要工具真跑了按钮就在。
 4. **相对链接 `/download/...` 经入口未转发**：按钮 href 是相对路径，依赖访问入口把 `/download` 转给 Flask。`web-admin` 开发态需在 `vite.config.ts` 代理 `/download`（和 `/admin`，否则政策页也断）；外部隧道/平台可能根本不转发或掐断该路径。
 
@@ -405,4 +421,6 @@ params={"department_id": root, "department_id_type": "open_department_id", ...}
 - 错误信息同时列出 references/ 和根目录的 `.md`；
 - docstring 改为「文档地图已在系统提示中，无需再读 SKILL.md」。
 
-**触发点**：`builtin_mcp_server.py` 从 `builtin_tools` 导入同一函数转发，飞书路径自动同享此修复。新增带 references 的 skill 无需改工具。
+**触发点**：`builtin_mcp_server.py` 从 `builtin_tools` 导入同一函数转发，**实现**自动同享此修复；新增带 references 的 skill 无需改工具。
+
+**⚠️ docstring 不会自动同步（文档漂移坑）**：MCP 转发层（`builtin_mcp_server.py`）里每个 `@mcp_server.tool()` 包装函数**重新声明了自己的 docstring**——这才是飞书侧 LLM 读到的工具 schema，**不是** `builtin_tools` 里的那份。所以改了 `builtin_tools` 工具的 docstring/参数说明后，必须手工把 `builtin_mcp_server.py` 对应包装函数的 docstring 一并改掉，否则飞书侧模型读到旧提示（本坑的 `load_policy_file` 就曾因此残留「已通过 SKILL.md 确定目标文件」的旧措辞，诱导飞书侧重新去读 SKILL.md）。根治办法是让转发层复用 LangChain 工具的 `.description`/参数 schema、消除重复，未做之前以「改一处记得改两处」为准。

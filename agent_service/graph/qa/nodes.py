@@ -95,10 +95,15 @@ def call_tools_node(state: ChatState) -> ChatState:
 
     # 构造工具调用消息：如果有 skill 文档地图（系统提示），注入给 LLM
     # 使模型能从文档地图中选择正确的 skill_name / filename 调用 load_policy_file
+    # 注入对话历史：否则工具决策看不到上下文，追问类需求（"把刚才查到的生成 Word"、
+    # "读一下上面那个文件"）无法解析指代。顺序 system(skill)→history→query，与
+    # extract_keywords_node / generate_node 口径一致；history 进图前已被裁剪（window_history /
+    # 飞书 10 轮窗口），不含当前 query，故不会重复。
     tool_msgs = []
     skill_prompt = (state.get("skill_system_prompt") or "").strip()
     if skill_prompt:
         tool_msgs.append(SystemMessage(content=skill_prompt))
+    tool_msgs.extend(_history_to_messages(state.get("history") or []))
     tool_msgs.append(HumanMessage(content=state["query"]))
 
     try:
@@ -112,12 +117,18 @@ def call_tools_node(state: ChatState) -> ChatState:
 
     results: List[str] = []
     tool_items: List[Dict] = []   # 结构化工具记录，供 api 层持久化为对话历史里的工具消息（Phase 0）
+    # 失败（找不到工具 / 执行抛错）也必须写进 results，否则 tool_results 为空、generate 的
+    # memory 段看不到失败，模型会以为工具成功或无视调用，可能编造结果。失败同样记入 tool_items
+    # 以保持会话历史与本轮实际尝试一致。
     for tc in response.tool_calls:
         name = tc["name"]
         args = tc.get("args", {})
         writer({"type": "tool_start", "name": name})
         matched = next((t for t in tools if t.name == name), None)
         if matched is None:
+            err = f"[工具调用失败] 未找到名为 {name!r} 的工具"
+            results.append(f"{name}: {err}")
+            tool_items.append({"name": name, "args": args, "result": err})
             writer({"type": "tool_end", "name": name, "error": "未找到工具"})
             continue
         try:
@@ -126,7 +137,9 @@ def call_tools_node(state: ChatState) -> ChatState:
             tool_items.append({"name": name, "args": args, "result": str(result)})
             writer({"type": "tool_end", "name": name, "result": str(result)})
         except Exception as exc:
-            tool_items.append({"name": name, "args": args, "result": f"[工具执行失败] {exc}"})
+            err = f"[工具执行失败] {exc}"
+            results.append(f"{name}: {err}")
+            tool_items.append({"name": name, "args": args, "result": err})
             writer({"type": "tool_end", "name": name, "error": str(exc)})
 
     if tool_items:

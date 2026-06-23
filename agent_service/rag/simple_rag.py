@@ -34,6 +34,10 @@ from agent_service.logging_config import get_logger
 
 log = get_logger(__name__)
 
+# 二进制文档：必须走结构化提取（PyMuPDF / unstructured），不能按文本编码直接读。
+# DocumentLoader 据此决定用 extract_text_from_file 还是 read_text_smart。
+_BINARY_DOC_EXT = {".pdf", ".docx"}
+
 # 新版 OpenAI 客户端
 try:
     from openai import OpenAI as OpenAIClient
@@ -64,7 +68,7 @@ class RAGConfig:
     chunk_overlap: int = 100
     reset_vector_store: bool = False
     source_path: Optional[Union[str, Path]] = None
-    allowed_extensions: Tuple[str, ...] = (".txt", ".md", ".rst", ".html")
+    allowed_extensions: Tuple[str, ...] = (".txt", ".md", ".rst", ".html", ".pdf", ".docx")
     # 可选: 'openai' (兼容模式), 'dashscope' (阿里云百炼原生), 或 None (本地)
     api_provider: Optional[str] = None
     api_key: Optional[str] = None
@@ -264,8 +268,19 @@ class DocumentLoader:
         metadatas: List[Dict] = []
         from agent_service.text_utils import read_text_smart
         for file in files:
-            text = read_text_smart(file)  # 自动识别 UTF-8/GBK 等编码，避免中文乱码
-            if not text:
+            # PDF/Word 必须走结构化提取（PyMuPDF / unstructured），不能按文本编码读；
+            # 其余按纯文本读取。单个文件失败只跳过该文件，不让整次索引重建挂掉。
+            try:
+                if file.suffix.lower() in _BINARY_DOC_EXT:
+                    # 延迟导入避免 rag ←→ builtin_tools 潜在循环依赖（与项目节点/线程约定一致）
+                    from agent_service.mcp.builtin_tools import extract_text_from_file
+                    text = extract_text_from_file(file)
+                else:
+                    text = read_text_smart(file)  # 自动识别 UTF-8/GBK 等编码，避免中文乱码
+            except Exception as exc:
+                log.warning("加载文档失败，跳过 %s: %s", file, exc)
+                continue
+            if not text or not text.strip():
                 continue
 
             seps = list(config.separators) if config.separators else None
