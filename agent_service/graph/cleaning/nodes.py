@@ -16,7 +16,8 @@ def read_file_node(state: CleaningState) -> CleaningState:
     if not fp:
         return {"error": "read_file: 未提供 file_path"}
     try:
-        raw = Path(fp).read_text(encoding="utf-8", errors="ignore").strip()
+        from agent_service.text_utils import read_text_smart
+        raw = read_text_smart(fp)  # 自动识别 UTF-8/GBK 等编码，避免中文乱码
         if not raw:
             return {"error": "read_file: 文件为空"}
         return {"raw_text": raw}

@@ -29,8 +29,13 @@ _DEFAULT_LEVEL = "INFO"
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-# 默认压低的三方库（非 DEBUG 时只看它们的 WARNING 及以上，避免刷屏）
+# 默认压低的三方库（非 DEBUG 时只看 WARNING 及以上；DEBUG 时放开以便追踪外部调用）
 _NOISY_LIBS = ("httpx", "httpcore", "urllib3", "openai", "chromadb", "sentence_transformers")
+
+# 始终压到 WARNING 的极吵库（即便根级别为 DEBUG 也不放开）：
+# pdfminer 是 pdfplumber 的后端，DEBUG 下每解析一个 PDF 会刷出上千行 psparser/pdfdocument 日志。
+# unstructured 在 partition 时也会输出大量元素级 DEBUG/INFO。
+_ALWAYS_QUIET_LIBS = ("pdfminer", "unstructured")
 
 _configured = False
 
@@ -86,6 +91,9 @@ def setup_logging(force: bool = False) -> int:
     noisy_level = logging.DEBUG if level <= logging.DEBUG else logging.WARNING
     for lib in _NOISY_LIBS:
         logging.getLogger(lib).setLevel(noisy_level)
+    # 极吵库无视根级别，恒压到 WARNING（设父 logger 即覆盖其全部子 logger）
+    for lib in _ALWAYS_QUIET_LIBS:
+        logging.getLogger(lib).setLevel(logging.WARNING)
 
     _configured = True
     logging.getLogger(__name__).debug("日志已初始化，级别=%s", level_name)

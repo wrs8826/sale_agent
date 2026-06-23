@@ -36,6 +36,7 @@ F:/销售agent/
 | `__init__.py` | 暴露绝对路径常量：`CONFIG_PATH` / `DOCS_DIR` / `WIKI_DIR` / `CHROMA_DIR` / `CONVERSATIONS_DIR` / `SKILLS_ROOT` / `DOWNLOADS_DIR` / `POLICY_STAGING_DIR` / `POLICY_DRAFTS_DIR` / `SKILL_BACKUPS_DIR` / `POLICY_SKILL_MAKER` |
 | `skill_loader.py` | 解析 `skills/*/SKILL.md`；`detect_skill(query)` 关键词匹配；`all_refs_dirs()` 返回所有 references 目录 |
 | `logging_config.py` | 集中式控制台日志：`setup_logging()`（`create_app` 最先调，幂等）+ `get_logger(__name__)`。级别 = env `LOG_LEVEL` > config `log_level` > INFO；DEBUG 时放开三方库日志。新代码用 `get_logger` 而非 `print()` |
+| `text_utils.py` | 纯文本健壮读取：`read_text_smart(path)` 自动识别 UTF-8/GBK(GB18030)/UTF-16 等编码，避免 GBK 中文乱码。读**用户上传文本**统一用它，勿用 `read_text(errors="ignore")` |
 | `config.yaml` | 配置入口；分块/检索参数 + chat/cleaner/reranker/embedding 四段 API 配置 + source_weights |
 | `security.py` | Fernet 加密 API key（密钥落 `.secret_key`） |
 | `rag/simple_rag.py` | `DocumentChunker` / `EmbedderFactory` / `HybridRetriever` / `DashScopeReranker` / `RAGConfig` |
@@ -46,7 +47,7 @@ F:/销售agent/
 | `mcp/mcp_manager.py` | `MCPManager` 单例：后台 asyncio 线程，`MultiServerMCPClient(mcpServers)` 把**两个 server 的工具合并**成 `self._tools` 注入飞书 ReAct Agent；状态回调，同步桥接 |
 | `mcp/lark_bot.py` | `LarkBot` 单例：`lark-oapi` SDK 长连接接收飞书消息；`_query()` 入口调 `detect_skill()` 注入 skill 提示词，两条路径（MCP Agent / RAG QA 图）均感知 skill |
 | `mcp/lark_history.py` | 飞书机器人对话历史持久化：`load_history` / `append_turn` / `clear_history`；文件存 `agent_service/lark_conversations/` |
-| `mcp/builtin_tools.py` | 内置 LangChain `@tool` 单一实现源 + 两套工具集：`BUILTIN_TOOLS`（核心，网页端+飞书 QA 降级共用：`get_current_time` / `load_policy_file` / `generate_word_document`）与 `WEB_TOOLS`（核心 + `read_document` / `list_documents` 文档读取，**仅网页端**）；`build_tool_table(tools)` 按集生成清单。`generate_word_document` 正文经 `_render_body` 渲染（识别 Markdown 表格→带边框 `Table Grid` 表、首行加粗，其余按段落；加粗/列表暂未解析）。`read_document` 读 `docs/` 整篇文本，依赖 `extract_text_from_file(path)`（`.pdf`→PyMuPDF / `.docx`→python-docx / 纯文本→UTF-8；该函数同时供 `/ingest` 用）。**飞书隔离**：靠 `ChatState.web_tools` 标志区分，飞书两条路径都不带，拿不到文档读取。**注意**：此文件非 MCP，仅文件名归类在 mcp/ 下 |
+| `mcp/builtin_tools.py` | 内置 LangChain `@tool` 单一实现源 + 两套工具集：`BUILTIN_TOOLS`（核心，网页端+飞书 QA 降级共用：`get_current_time` / `load_policy_file` / `generate_word_document`）与 `WEB_TOOLS`（核心 + `read_document` / `list_documents` 文档读取，**仅网页端**）；`build_tool_table(tools)` 按集生成清单。`generate_word_document` 正文经 `_render_body` 渲染（识别 Markdown 表格→带边框 `Table Grid` 表、首行加粗，其余按段落；加粗/列表暂未解析）。`read_document` 读 `docs/` 整篇文本，依赖 `extract_text_from_file(path)`（`.pdf`→PyMuPDF 取文本+pdfplumber 取表格按位置合并去重 / `.docx`→unstructured 结构化提取(标题→`## `/表格→管道/页眉页脚)，回退 python-docx 按 body XML 顺序遍历 / 纯文本→UTF-8；该函数同时供 `/ingest` 用）。**读 Word 用 unstructured，写 Word（`generate_word_document`）用 python-docx**。**飞书隔离**：靠 `ChatState.web_tools` 标志区分，飞书两条路径都不带，拿不到文档读取。**注意**：此文件非 MCP，仅文件名归类在 mcp/ 下 |
 | `mcp/builtin_mcp_server.py` | 把内置工具暴露为 MCP（飞书路径），`FastMCP("builtin-tools")`。**已转发 3 个核心工具**：`get_current_time` / `load_policy_file` / `generate_word_document`（与 `BUILTIN_TOOLS` 一致），均注入飞书 ReAct Agent。文档读取工具（`read_document` / `list_documents`）**刻意未转发**，只走网页端 `WEB_TOOLS`。`generate_word_document` 转发层用 `_public_base_url()` 把相对 `/download/` 链接重写为绝对 URL（仅飞书路径，网页端仍相对）。`/download` 路由无 `login_required`，公开可访问，故绝对链接飞书用户可直接下载。新增工具若也要给飞书用才需在此加 `@mcp_server.tool()` 转发 |
 
 ### `skills/`（领域知识 skill，纯提示注入，无执行能力）

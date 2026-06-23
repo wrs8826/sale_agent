@@ -11,6 +11,7 @@
 - **工具执行实时清单**：调用工具时前端实时渲染可折叠清单，未执行 `[ ]`、成功 `[✅]`、失败 `[❌]`，每个工具事件刷新一次；实时与历史、用户端与管理端统一同一套 UI
 - **确定性文件下载**：生成 Word 后由后端从真实工具结果下发下载链接、前端渲染「下载」按钮，不依赖模型转述链接（避免模型把链接写错/编造）
 - **内置工具**：读取文档（PDF / Word / 文本，`read_document`）、列文件、查政策原文、生成 Word（返回下载链接）、获取时间；网页端独有文档读取，飞书侧不暴露
+- **结构化文档解析**：PDF 用 PyMuPDF 取正文 + pdfplumber 取表格，按页内位置合并去重；Word 读取用 unstructured 结构化（标题→Markdown、表格→管道、含页眉页脚，失败回退 python-docx 且保持段落/表格原始顺序）；Word 生成仍用 python-docx；纯文本自动识别编码（UTF-8/GBK 等，避免中文乱码）
 - **文档读取与上传**：知识库支持 `.txt/.md/.rst/.html/.pdf/.docx`；对话框回形针可直接上传文件让助手读取
 - **四级对话压缩**：L1 滑动窗口（最近 20 轮）+ L2 工具记录裁剪 + L3 滚动摘要（DeepSeek 分词器精确计数，1M 上下文预算）+ L4 熔断全局强压；工具调用持久化进历史
 - **技能系统**：通过 `skills/` 目录挂载专项技能，关键词路由自动匹配；管理端可上传政策材料 →（开发态 `policy_skill_maker` 方法论）自动生成 skill 草稿 → 人工审核发布
@@ -137,6 +138,8 @@ cd web-admin && npm install && npm run dev
 │   │   ├── builtin_tools.py        # 内置 @tool（read_document 等）+ 文本提取
 │   │   └── builtin_mcp_server.py   # 把核心工具暴露为 MCP（飞书路径）
 │   ├── token_counter.py    # DeepSeek 分词器精确 token 计数（压缩阈值用）
+│   ├── text_utils.py       # 纯文本健壮读取（UTF-8/GBK 等编码自动识别）
+│   ├── logging_config.py   # 集中式日志（级别由 LOG_LEVEL / config.yaml 控制）
 │   ├── config.yaml         # 运行时配置（gitignored）
 │   ├── config.yaml.example # 配置模板
 │   └── security.py         # API Key Fernet 加密
@@ -157,7 +160,7 @@ Content-Type: application/json
 {"filename": "your_doc.txt"}
 ```
 
-- PDF / Word 经 `extract_text_from_file`（PyMuPDF / python-docx）提取文本入库；二进制原件保留，供 `read_document` 工具读取整篇内容。
+- PDF / Word 经 `extract_text_from_file` 提取文本入库：PDF = PyMuPDF（正文）+ pdfplumber（表格）按位置合并去重；Word = unstructured 结构化（失败回退 python-docx，保段落/表格顺序）；纯文本经 `text_utils.read_text_smart` 自动识别 UTF-8/GBK 等编码。二进制原件保留，供 `read_document` 工具读取整篇内容。
 - 对话界面的回形针按钮可即时上传文件并让助手读取（复用 `/upload`）。
 - 反馈沉淀的优质回答会自动写入 `agent_service/wiki/`，作为补充知识源（权重可在 `config.yaml` 的 `source_weights` 调节）。
 
@@ -193,6 +196,7 @@ Content-Type: application/json
 ## 技术栈
 
 - **后端**：Flask、LangGraph、LangChain、ChromaDB、rank-bm25、jieba（中文分词）、sentence-transformers
+- **文档解析**：PyMuPDF + pdfplumber（PDF 文本/表格）、unstructured + python-docx（Word 读/写）、charset-normalizer（编码识别）
 - **前端**：vanilla JS（用户端）、React + TypeScript + Tailwind CSS + Vite（管理端）
 - **LLM**：兼容 OpenAI 接口（默认阿里云百炼 Dashscope）
 - **飞书集成**：lark-oapi SDK WebSocket 长连接

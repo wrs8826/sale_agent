@@ -272,7 +272,11 @@ generate_node：skill_prompt + tool_results → 回答
 - `call_tools_node` 与 `generate_node`（`build_tool_table(tools)`）都按 `state.get("web_tools")` 选择工具集。
 
 **文档文本提取**：`extract_text_from_file(path)` 是 `read_document` 工具与 `/ingest` 清洗的单一实现：
-`.pdf`→PyMuPDF、`.docx`→python-docx（段落+表格）、纯文本→UTF-8 读取；`.doc` 与缺依赖时抛错。
+`.pdf`→PyMuPDF + pdfplumber、`.docx`→unstructured（回退 python-docx）、纯文本→`text_utils.read_text_smart` 自动识别编码；`.doc` 与缺依赖时抛错。
+**读 Word 用 unstructured 结构化，写 Word（`generate_word_document` 工具）仍用 python-docx**——读写两条路不要混。
+- **纯文本编码**（`agent_service/text_utils.py`）：`read_text_smart(path)` 按 BOM→UTF-8→GB18030→charset-normalizer→UTF-8 replace 顺序解码，**GB18030 排在探测库前**（大陆旧文本几乎都是 GBK/GB2312，探测库对短样本易误判）。用户上传文本的三处读取统一走它：`extract_text_from_file` 纯文本兜底、`DocumentLoader.load`（RAG 索引）、清洗子图 `read_file_node`。**不要**再用 `read_text(encoding="utf-8", errors="ignore")` 读用户文本——会把 GBK 中文整段丢成空。
+- `.pdf`（`_extract_pdf`）：**PyMuPDF 取正文文本块 + pdfplumber 取表格，按页内垂直位置合并**。落在 pdfplumber 表格 bbox 内的 PyMuPDF 文本块会被剔除（中心点判定），避免与表格内容重复（PyMuPDF 全页文本本就含被打散的表格单元格）。pdfplumber 缺失或单页解析异常时优雅降级为 PyMuPDF 全页文本，不报错。扫描版/图片 PDF 仍无文本层（无 OCR）。
+- `.docx`（`_extract_docx_unstructured` 为主）：用 `unstructured.partition.docx.partition_docx` **按文档原始顺序**取元素——`Title`→渲染成 `## `（供 DocumentChunker 标题分隔识别）、`Table`→`metadata.text_as_html` 经 `_html_table_to_pipes` 转管道行、`ListItem`→`- `、其余→段落；**页眉/页脚也会被捕获**。unstructured 缺失或解析失败时回退 `_extract_docx_python_docx`（按 body XML 顺序遍历 `w:p`/`w:tbl`，保表格位置，**勿**用 `doc.paragraphs`+`doc.tables` 分别遍历那会把表格挪到文末）。
 
 新增工具：在 `builtin_tools.py` 加 `@tool` 函数，追加到 `BUILTIN_TOOLS`（核心，飞书也要用）
 或仅 `WEB_TOOLS`（仅网页端）。若要给飞书 MCP 路径用，还需在 `builtin_mcp_server.py` 加 `@mcp_server.tool()` 转发。
@@ -566,7 +570,7 @@ app 启动 → lark_bot.start()
 集中式控制台日志。`create_app()` **最先**调 `setup_logging()`（早于注册蓝图），配置根 logger 的 `StreamHandler`，统一格式 `时间 [级别] 模块名: 消息`。
 
 - **级别来源**（优先级从高到低）：环境变量 `LOG_LEVEL` > `config.yaml` 顶层 `log_level` > 默认 `INFO`。排查问题时把 `log_level` 改 `DEBUG`（或 `LOG_LEVEL=DEBUG` 临时覆盖）。
-- **三方库降噪**：`httpx`/`openai`/`chromadb` 等默认压到 WARNING；**仅当级别为 DEBUG 时**才放开，便于追踪外部 API 调用。
+- **三方库降噪**：`httpx`/`openai`/`chromadb` 等（`_NOISY_LIBS`）默认压到 WARNING，**仅 DEBUG 时**放开以便追踪外部 API；`pdfminer`（`_ALWAYS_QUIET_LIBS`，pdfplumber 后端）**恒压 WARNING**——它在 DEBUG 下每解析一个 PDF 会刷上千行，故即使根级别为 DEBUG 也不放开。
 - **取 logger**：业务模块用 `from agent_service.logging_config import get_logger; log = get_logger(__name__)`，不要用 `print()`（`print` 不受 `log_level` 控制）。`setup_logging()` 幂等（按 handler 标记去重，双进程/热重载不会重复打印）。
 - **已迁移到 logger 的核心路径**：`rag/simple_rag.py`、`api/services.py`、`graph/qa/nodes.py`（检索/嵌入/重排诊断 + RAG 重建/检索命中数 INFO/DEBUG 信号）。其余模块的历史 `print()` 仍直接进控制台、不受级别控制，可按需增量迁移。
 - `log_level` 是 config.yaml 顶层非 RAG 字段，已加入 `RAGConfig._NON_RAG_KEYS` 白名单（不触发“未知字段”告警）。

@@ -262,8 +262,9 @@ class DocumentLoader:
 
         documents: List[str] = []
         metadatas: List[Dict] = []
+        from agent_service.text_utils import read_text_smart
         for file in files:
-            text = file.read_text(encoding="utf-8", errors="ignore").strip()
+            text = read_text_smart(file)  # 自动识别 UTF-8/GBK 等编码，避免中文乱码
             if not text:
                 continue
 

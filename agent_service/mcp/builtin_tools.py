@@ -9,8 +9,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import List, Optional, Tuple
 
 from langchain_core.tools import tool
+
+from agent_service.logging_config import get_logger
+
+log = get_logger(__name__)
 
 # ── 文档文本提取（工具与 /ingest 共用的单一实现） ──────────────────────────────
 
@@ -18,13 +23,212 @@ from langchain_core.tools import tool
 _TEXT_EXTS = {".txt", ".md", ".rst", ".html", ".htm", ".csv", ".log", ".json"}
 
 
+# ── PDF 提取：PyMuPDF 取正文文本 + pdfplumber 取表格，按页内位置合并去重 ─────────
+
+def _point_in_any_bbox(x: float, y: float, bboxes: List[Tuple[float, float, float, float]]) -> bool:
+    """判断点 (x, y) 是否落在任一表格 bbox (x0, top, x1, bottom) 内。"""
+    for bx0, btop, bx1, bbottom in bboxes:
+        if bx0 <= x <= bx1 and btop <= y <= bbottom:
+            return True
+    return False
+
+
+def _render_pdf_table(rows: list) -> str:
+    """把 pdfplumber 的 table.extract() 结果渲染为管道分隔文本（与 .docx 表格口径一致）。"""
+    out = []
+    for row in rows or []:
+        cells = [((c or "").strip().replace("\n", " ")) for c in row]
+        if any(cells):
+            out.append(" | ".join(cells))
+    return "\n".join(out)
+
+
+def _extract_pdf(path: Path) -> str:
+    """PDF 文本提取：PyMuPDF 取正文文本块 + pdfplumber 取表格，按页内垂直位置合并。
+
+    - 落在 pdfplumber 识别的表格 bbox 内的 PyMuPDF 文本块会被剔除，避免与表格内容重复
+      （PyMuPDF 全页文本本就包含被打散的表格单元格文字）。
+    - pdfplumber 缺失或某页解析异常时，优雅降级为 PyMuPDF 全页文本，不报错。
+    - 扫描版/图片型 PDF 仍无文本层（无 OCR），返回空由调用方提示。
+    """
+    import fitz  # PyMuPDF；调用方已确保依赖存在
+
+    try:
+        import pdfplumber
+    except ImportError:
+        log.warning("未安装 pdfplumber，PDF 表格将按普通文本提取；建议 pip install pdfplumber")
+        pdfplumber = None
+
+    if pdfplumber is None:
+        with fitz.open(str(path)) as doc:
+            return "\n".join(page.get_text() for page in doc).strip()
+
+    page_texts: List[str] = []
+    with fitz.open(str(path)) as fdoc, pdfplumber.open(str(path)) as pdoc:
+        n = min(fdoc.page_count, len(pdoc.pages))
+        for i in range(n):
+            fpage = fdoc[i]
+            ppage = pdoc.pages[i]
+
+            # 1) pdfplumber 识别表格（bbox + 数据）；失败则该页退化为纯文本
+            try:
+                tables = ppage.find_tables() or []
+            except Exception as exc:
+                log.debug("pdfplumber 第 %d 页表格识别失败，退化为纯文本: %s", i + 1, exc)
+                page_texts.append(fpage.get_text().strip())
+                continue
+
+            table_bboxes = [t.bbox for t in tables]  # (x0, top, x1, bottom)
+            items: List[Tuple[float, float, str]] = []  # (top, left, content)
+
+            # 2) PyMuPDF 文本块，剔除落在表格区域内的块（中心点判定）
+            for blk in fpage.get_text("blocks"):
+                # blk: (x0, y0, x1, y1, text, block_no, block_type)；block_type 1 为图片
+                if len(blk) >= 7 and blk[6] != 0:
+                    continue
+                x0, y0, x1, y1, text = blk[0], blk[1], blk[2], blk[3], blk[4]
+                if not text or not text.strip():
+                    continue
+                cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+                if _point_in_any_bbox(cx, cy, table_bboxes):
+                    continue
+                items.append((y0, x0, text.strip()))
+
+            # 3) 表格按其 bbox 顶部位置插回
+            for t in tables:
+                try:
+                    rendered = _render_pdf_table(t.extract())
+                except Exception as exc:
+                    log.debug("pdfplumber 第 %d 页表格抽取失败: %s", i + 1, exc)
+                    continue
+                if rendered.strip():
+                    items.append((t.bbox[1], t.bbox[0], rendered))
+
+            # 4) 按垂直、再水平位置排序合并，复原阅读顺序
+            items.sort(key=lambda it: (round(it[0], 1), it[1]))
+            page_text = "\n".join(c for _, _, c in items).strip()
+            if page_text:
+                page_texts.append(page_text)
+
+    return "\n".join(page_texts).strip()
+
+
+# ── Word(.docx) 提取：unstructured 结构化为主，python-docx 为回退 ─────────────────
+
+def _html_table_to_pipes(html: str) -> str:
+    """把 unstructured Table 的 text_as_html 渲染为管道分隔文本（与 PDF/python-docx 表格口径一致）。"""
+    if not html:
+        return ""
+    from html.parser import HTMLParser
+
+    class _TableParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.rows: List[List[str]] = []
+            self._row: Optional[List[str]] = None
+            self._cell: Optional[List[str]] = None
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "tr":
+                self._row = []
+            elif tag in ("td", "th"):
+                self._cell = []
+
+        def handle_endtag(self, tag):
+            if tag == "tr" and self._row is not None:
+                self.rows.append(self._row)
+                self._row = None
+            elif tag in ("td", "th") and self._cell is not None:
+                if self._row is not None:
+                    self._row.append("".join(self._cell).strip())
+                self._cell = None
+
+        def handle_data(self, data):
+            if self._cell is not None:
+                self._cell.append(data)
+
+    parser = _TableParser()
+    parser.feed(html)
+    lines = []
+    for row in parser.rows:
+        cells = [c.replace("\n", " ").strip() for c in row]
+        if any(cells):
+            lines.append(" | ".join(cells))
+    return "\n".join(lines)
+
+
+def _extract_docx_unstructured(path: Path) -> Optional[str]:
+    """用 unstructured 结构化读取 .docx：标题→Markdown 标题、表格→管道行、列表→`- `、其余→段落。
+
+    元素按文档原始顺序返回（含页眉/页脚），标题渲染成 `## ` 便于下游 DocumentChunker 的标题分隔识别。
+    返回结构化纯文本；unstructured 不可用或解析失败时返回 None，由调用方回退 python-docx。
+    """
+    try:
+        from unstructured.partition.docx import partition_docx
+    except ImportError:
+        log.warning("未安装 unstructured，.docx 改用 python-docx 提取；建议 pip install unstructured")
+        return None
+    try:
+        elements = partition_docx(filename=str(path))
+    except Exception as exc:
+        log.warning(".docx unstructured 解析失败，回退 python-docx: %s", exc)
+        return None
+
+    parts: List[str] = []
+    for el in elements:
+        category = getattr(el, "category", "") or type(el).__name__
+        text = (getattr(el, "text", "") or "").strip()
+        if category == "Table":
+            html = getattr(getattr(el, "metadata", None), "text_as_html", None)
+            rendered = _html_table_to_pipes(html) if html else text
+            if rendered.strip():
+                parts.append(rendered)
+        elif category in ("Title", "Header"):
+            if text:
+                parts.append(f"## {text}")
+        elif category == "ListItem":
+            if text:
+                parts.append(f"- {text}")
+        else:
+            if text:
+                parts.append(text)
+    return "\n".join(parts).strip()
+
+
+def _extract_docx_python_docx(path: Path) -> str:
+    """回退实现：python-docx 按 body 的 XML 子节点顺序遍历，保持段落与表格的原始先后位置。"""
+    try:
+        from docx import Document
+        from docx.oxml.ns import qn
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
+    except ImportError as exc:
+        raise RuntimeError(
+            "服务器未安装 python-docx，无法读取 Word，请先 pip install python-docx。"
+        ) from exc
+    doc = Document(str(path))
+    # doc.paragraphs / doc.tables 是两个独立集合，分别遍历会把表格全部挪到文末；这里按 XML 顺序遍历。
+    parts = []
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            text = Paragraph(child, doc).text
+            if text and text.strip():
+                parts.append(text.strip())
+        elif child.tag == qn("w:tbl"):
+            for row in Table(child, doc).rows:
+                cells = [c.text.strip() for c in row.cells]
+                if any(cells):
+                    parts.append(" | ".join(cells))
+    return "\n".join(parts).strip()
+
+
 def extract_text_from_file(path: Path) -> str:
     """按扩展名从文件中提取纯文本，供 read_document 工具与 /ingest 清洗共用。
 
     支持：
-        .pdf            → PyMuPDF 逐页提取
-        .docx           → python-docx 提取段落 + 表格单元格
-        纯文本类         → UTF-8 读取（errors="ignore"）
+        .pdf            → PyMuPDF 取正文 + pdfplumber 取表格，按位置合并去重
+        .docx           → unstructured 结构化提取（标题/表格/列表/页眉页脚）；失败回退 python-docx
+        纯文本类         → 自动识别编码读取（UTF-8/GBK 等，见 text_utils.read_text_smart）
     不支持 .doc（旧二进制 Word）；缺少依赖或解析失败时抛出异常，由调用方决定如何呈现。
 
     Args:
@@ -37,38 +241,27 @@ def extract_text_from_file(path: Path) -> str:
 
     if ext == ".pdf":
         try:
-            import fitz  # PyMuPDF
+            import fitz  # noqa: F401  仅探测 PyMuPDF 依赖；实际提取在 _extract_pdf 内
         except ImportError as exc:
             raise RuntimeError(
                 "服务器未安装 PyMuPDF，无法读取 PDF，请先 pip install pymupdf。"
             ) from exc
-        parts = []
-        with fitz.open(str(path)) as doc:
-            for page in doc:
-                parts.append(page.get_text())
-        return "\n".join(parts).strip()
+        return _extract_pdf(path)
 
     if ext == ".docx":
-        try:
-            from docx import Document
-        except ImportError as exc:
-            raise RuntimeError(
-                "服务器未安装 python-docx，无法读取 Word，请先 pip install python-docx。"
-            ) from exc
-        doc = Document(str(path))
-        parts = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
-        for table in doc.tables:
-            for row in table.rows:
-                cells = [c.text.strip() for c in row.cells]
-                if any(cells):
-                    parts.append(" | ".join(cells))
-        return "\n".join(parts).strip()
+        # 主路径：unstructured 结构化读取；不可用或失败时回退 python-docx（按 body XML 顺序遍历）。
+        text = _extract_docx_unstructured(path)
+        if text is not None:
+            return text
+        return _extract_docx_python_docx(path)
 
     if ext == ".doc":
         raise RuntimeError("暂不支持旧版 .doc 二进制格式，请另存为 .docx 或 PDF 后再上传。")
 
-    # 其余按纯文本读取
-    return path.read_text(encoding="utf-8", errors="ignore").strip()
+    # 其余按纯文本读取（自动识别 UTF-8/GBK 等编码，避免中文乱码）
+    from agent_service.text_utils import read_text_smart
+
+    return read_text_smart(path)
 
 
 # ── 工具定义 ──────────────────────────────────────────────────────────────────
