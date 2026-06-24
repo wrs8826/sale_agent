@@ -171,7 +171,8 @@ cd web-admin && npm install && npm run dev
 ├── policy_skill_maker/     # 开发态 meta-skill：政策 skill 设计方法论（不进 skills/）
 ├── token/                  # 官方 DeepSeek 分词器（tokenizer.json 等）
 ├── web/                    # 用户端静态文件（vanilla JS）
-└── web-admin/              # 管理后台（React + TypeScript + Vite）
+├── web-admin/              # 管理后台（React + TypeScript + Vite）
+└── eval/                   # 离线检索评测脚本（BM25/向量/混合 对比）
 ```
 
 ## 知识库管理
@@ -192,6 +193,30 @@ Content-Type: application/json
 ### 政策 Skill 更新（管理端）
 
 管理后台「政策 Skill」页：上传**政策材料**（隔离暂存，不进正常检索）→ Agent 按 `policy_skill_maker` 方法论解析生成 skill 草稿（自动匹配已有地区或新建）→ 人工审核 → 发布到 `skills/`（落盘前备份、热重载）。
+
+## 检索评测
+
+`eval/retrieval_eval.py` 复用线上同款索引（`api.services.get_rag`，一致的分块 / 嵌入 / 融合逻辑），对 **BM25 / 纯向量 / 混合** 三种策略输出 Hit@k、Recall@k、MRR 与检索延迟，用于量化混合检索的实际收益。
+
+在 40 条真实业务查询的标注集上（`top_k=3`）：
+
+| 策略 | Recall@3 | MRR | P95 延迟 |
+|---|---|---|---|
+| BM25 | 90.0% | 0.887 | 320ms |
+| 纯向量 | 92.5% | 0.863 | 260ms |
+| **混合（BM25 + 向量）** | **95.0%** | **0.912** | **251ms** |
+
+> 混合检索 Recall@3 与 MRR 均为最优（相对纯向量 MRR +5.8%），且延迟最低。`top_k=5/10` 时三种策略 Recall 饱和到 95%，小 `top_k` 更能体现差异。
+
+复现：
+
+```bash
+python eval/retrieval_eval.py --make-template            # 按现有知识库生成标注模板
+# 填好 eval/eval_set.json 后：
+python eval/retrieval_eval.py --top-k 3 --report eval/report.json
+```
+
+> 标注集 `eval/eval_set.json` 与报告取自私聊数据、含客户隐私，已 gitignore；仓库仅保留脚本与脱敏示例 `eval_set.example.json`。
 
 ## 飞书机器人
 
