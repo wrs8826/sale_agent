@@ -24,7 +24,8 @@ F:/销售agent/
 ├── api/                  ← Flask 蓝图（IO 边界、SSE 包装、单例缓存）
 ├── web/                  ← 旧静态前端（vanilla JS，用户端保留）
 ├── web-admin/            ← 新管理员前端（React + TypeScript + Tailwind CSS + Vite）
-└── write_skill/          ← 本 skill
+├── write_skill/          ← 本 skill
+└── eval/                 ← 离线检索评测脚本（BM25/向量/混合 对比；真实标注集与报告本地不入库）
 ```
 
 ## 模块地图（一行一个）
@@ -34,7 +35,7 @@ F:/销售agent/
 | 路径 | 职责 |
 |---|---|
 | `__init__.py` | 暴露绝对路径常量：`CONFIG_PATH` / `DOCS_DIR` / `WIKI_DIR` / `CHROMA_DIR` / `CONVERSATIONS_DIR` / `SKILLS_ROOT` / `DOWNLOADS_DIR` / `POLICY_STAGING_DIR` / `POLICY_DRAFTS_DIR` / `SKILL_BACKUPS_DIR` / `POLICY_SKILL_MAKER` |
-| `skill_loader.py` | 解析 `skills/*/SKILL.md`；`detect_skill(query)` 关键词匹配；`all_refs_dirs()` 返回所有 references 目录 |
+| `skill_loader.py` | 解析 `skills/*/SKILL.md`；`detect_skill(query)` 关键词匹配；`all_refs_dirs()` 现返回 `[]`（Path 2 架构：references 不进 RAG 索引，由 `load_policy_file` 工具按需读取） |
 | `logging_config.py` | 集中式控制台日志：`setup_logging()`（`create_app` 最先调，幂等）+ `get_logger(__name__)`。级别 = env `LOG_LEVEL` > config `log_level` > INFO；DEBUG 时放开三方库日志。新代码用 `get_logger` 而非 `print()` |
 | `text_utils.py` | 纯文本健壮读取：`read_text_smart(path)` 自动识别 UTF-8/GBK(GB18030)/UTF-16 等编码，避免 GBK 中文乱码。读**用户上传文本**统一用它，勿用 `read_text(errors="ignore")` |
 | `config.yaml` | 配置入口；分块/检索参数 + chat/cleaner/reranker/embedding 四段 API 配置 + source_weights |
@@ -213,3 +214,12 @@ agent_service/config.yaml          # 配置主文件
 agent_service/conversations/*.json # 会话持久化
 agent_service/chroma_persist/      # 向量库
 ```
+
+## 检索评测（`eval/`）
+
+`eval/retrieval_eval.py`：离线评测混合检索质量。**复用 `api.services.get_rag` 构建的同款索引**（与线上一致的分块/嵌入/融合），对同一索引分别用 `bm25_weight=1.0/0.0/cfg.bm25_weight` 跑出 **BM25 / 向量 / 混合**三种策略，输出 Hit@1、Hit@k、Recall@k、MRR 与检索延迟（mean/p50/p95）。
+
+- **标注集** `eval/eval_set.json`：`[{"query": "...", "relevant": ["文件名 或 路径片段"]}]`；`relevant` 对命中文档的 `filename`/`source`（分隔符已归一化为 `/`）做大小写无关子串匹配，故重名文件用 `城市/references/文件名.md` 这类唯一路径区分。
+- **坑**：评测语料 = `docs/` + `wiki/`；**skill `references/`（政策文档）不在检索索引内**（`all_refs_dirs()` 返回 `[]`，靠 `load_policy_file` 按需读取）——标注集别拿政策文档当 ground truth，否则全 miss。
+- **隐私**：`eval_set.json` / `report*.json` 取自 `docs/` 私聊、含真实客户姓名，已随 `docs/` 一并 gitignore（见 `eval/.gitignore`），**不入库**；仓库只保留脚本与脱敏示例 `eval_set.example.json`。
+- **运行**：`python eval/retrieval_eval.py --make-template`（按现有库生成标注模板）→ 填好后 `python eval/retrieval_eval.py --top-k 3 --report eval/report.json`（小语料用小 `top_k` 才有区分度，Recall@10 易饱和）。

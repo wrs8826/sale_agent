@@ -1,0 +1,4 @@
+# 真实评测数据来自 docs/ 私聊记录，含客户姓名等隐私（与 docs/ 同理不入库）。
+# 仓库只保留可复用脚本 retrieval_eval.py 与脱敏示例 eval_set.example.json。
+eval_set.json
+report*.json
