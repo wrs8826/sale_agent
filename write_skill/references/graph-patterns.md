@@ -60,7 +60,8 @@ state = {
     "history": history,               # [{role, content}, ...]
     "chat_cfg": chat_cfg,
     "rag_fn": rag_fn,                 # callable (q, k) -> list
-    "top_k": 5,
+    "top_k": top_k,                   # 请求体 top_k 优先，缺省兜底 cfg.top_k（config.yaml）
+
     "score_threshold": 0.3,
     "skill_system_prompt": skill.system_prompt if skill else "",
     "skill_table": build_skill_table(),

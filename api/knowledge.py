@@ -110,13 +110,20 @@ def query():
     if not q:
         return jsonify({"error": "查询内容不能为空"}), 400
 
-    chunk_size = int(data.get("chunk_size", 400))
-    chunk_overlap = int(data.get("chunk_overlap", 100))
-    separators = data.get("separators") or None
-    top_k = int(data.get("top_k", 5))
-    bm25_weight = float(data.get("bm25_weight", 0.5))
-    bm25_k = int(data.get("bm25_k", 8))
-    vector_k = int(data.get("vector_k", 8))
+    # 兜底使用 config.yaml（RAGConfig）；请求体显式提供则覆盖。
+    # 用「key 在且非 None」判断，确保 bm25_weight=0.0（纯向量）这类合法假值不被吞掉。
+    cfg = services.load_config()
+
+    def _override(key, default, cast):
+        return cast(data[key]) if data.get(key) is not None else default
+
+    chunk_size = _override("chunk_size", cfg.chunk_size, int)
+    chunk_overlap = _override("chunk_overlap", cfg.chunk_overlap, int)
+    separators = data.get("separators") or (list(cfg.separators) if cfg.separators else None)
+    top_k = _override("top_k", cfg.top_k, int)
+    bm25_weight = _override("bm25_weight", cfg.bm25_weight, float)
+    bm25_k = _override("bm25_k", cfg.bm25_k, int)
+    vector_k = _override("vector_k", cfg.vector_k, int)
     use_reranker = bool(data.get("use_reranker", False))
 
     try:

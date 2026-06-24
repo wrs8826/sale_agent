@@ -98,7 +98,6 @@ def agent_chat():
     """SSE 流式端点：驱动 QA 主图，节点自带 tool_*/token/done 事件。"""
     data = request.get_json(silent=True) or {}
     message = data.get("message", "").strip()
-    top_k = int(data.get("top_k", 5))
     conversation_id = (data.get("conversation_id") or "").strip()
 
     if not message:
@@ -173,6 +172,9 @@ def agent_chat():
         )
     except Exception as e:
         return jsonify({"error": f"索引构建失败: {e}"}), 500
+
+    # top_k：请求体显式提供则优先，否则兜底到 config.yaml 的 RAGConfig.top_k。
+    top_k = int(data["top_k"]) if data.get("top_k") is not None else cfg.top_k
 
     def rag_fn(q: str, k: int):
         cur = services.get_current_rag()
