@@ -1,0 +1,33 @@
+[
+  {
+    "query": "（RAG 召回示例）某客户代缴社保的服务费是多少？",
+    "category": "rag",
+    "relevant": ["私聊_示例客户.txt"],
+    "must_contain": ["100"]
+  },
+  {
+    "query": "太仓创业领军人才A类的项目资助是多少？",
+    "category": "policy",
+    "expected_tool": "load_policy_file",
+    "must_contain": ["300万"]
+  },
+  {
+    "query": "现在几点了？",
+    "category": "tool",
+    "expected_tool": "get_current_time"
+  },
+  {
+    "query": "帮我生成一份产品介绍的 word 文档",
+    "category": "tool",
+    "expected_tool": "generate_word_document"
+  },
+  {
+    "query": "知识库里有哪些文件？",
+    "category": "tool",
+    "expected_tool": "list_documents"
+  },
+  {
+    "query": "今天上海的天气怎么样？",
+    "category": "ood"
+  }
+]
