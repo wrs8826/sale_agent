@@ -25,7 +25,7 @@ F:/销售agent/
 ├── web/                  ← 旧静态前端（vanilla JS，用户端保留）
 ├── web-admin/            ← 新管理员前端（React + TypeScript + Tailwind CSS + Vite）
 ├── write_skill/          ← 本 skill
-└── eval/                 ← 离线检索评测脚本（BM25/向量/混合 对比；真实标注集与报告本地不入库）
+└── eval/                 ← 离线评测脚本：retrieval_eval.py（检索）+ agent_eval.py（端到端五维）；真实标注集与报告本地不入库
 ```
 
 ## 模块地图（一行一个）
@@ -215,11 +215,22 @@ agent_service/conversations/*.json # 会话持久化
 agent_service/chroma_persist/      # 向量库
 ```
 
-## 检索评测（`eval/`）
+## 评测（`eval/`）
 
-`eval/retrieval_eval.py`：离线评测混合检索质量。**复用 `api.services.get_rag` 构建的同款索引**（与线上一致的分块/嵌入/融合），对同一索引分别用 `bm25_weight=1.0/0.0/cfg.bm25_weight` 跑出 **BM25 / 向量 / 混合**三种策略，输出 Hit@1、Hit@k、Recall@k、MRR 与检索延迟（mean/p50/p95）。
+两套离线评测，均**复用 `api.services` 构建的同款索引/图**（与线上一致），跑出的数字可直接作为效果佐证。
+
+### `retrieval_eval.py` —— 纯检索质量
+
+复用 `get_rag` 的同款索引，对同一索引分别用 `bm25_weight=1.0/0.0/cfg.bm25_weight` 跑出 **BM25 / 向量 / 混合**三种策略，输出 Hit@1、Hit@k、Recall@k、MRR 与检索延迟（mean/p50/p95）。
 
 - **标注集** `eval/eval_set.json`：`[{"query": "...", "relevant": ["文件名 或 路径片段"]}]`；`relevant` 对命中文档的 `filename`/`source`（分隔符已归一化为 `/`）做大小写无关子串匹配，故重名文件用 `城市/references/文件名.md` 这类唯一路径区分。
-- **坑**：评测语料 = `docs/` + `wiki/`；**skill `references/`（政策文档）不在检索索引内**（`all_refs_dirs()` 返回 `[]`，靠 `load_policy_file` 按需读取）——标注集别拿政策文档当 ground truth，否则全 miss。
-- **隐私**：`eval_set.json` / `report*.json` 取自 `docs/` 私聊、含真实客户姓名，已随 `docs/` 一并 gitignore（见 `eval/.gitignore`），**不入库**；仓库只保留脚本与脱敏示例 `eval_set.example.json`。
-- **运行**：`python eval/retrieval_eval.py --make-template`（按现有库生成标注模板）→ 填好后 `python eval/retrieval_eval.py --top-k 3 --report eval/report.json`（小语料用小 `top_k` 才有区分度，Recall@10 易饱和）。
+- **运行**：`--make-template`（按现有库生成标注模板）→ 填好后 `python eval/retrieval_eval.py --top-k 3 --report eval/report.json`（小语料用小 `top_k` 才有区分度，Recall@10 易饱和）。
+
+### `agent_eval.py` —— 端到端 Agent 五维
+
+真正驱动 QA 主图（`build_qa_graph` + `graph.stream(stream_mode="custom")`），从事件流采集工具调用与最终回答，评测五维：**检索召回**（Recall@k/MRR/Hit@1）、**置信度**（top-1 检索分 vs `score_threshold`，含域内/域外分离）、**工具执行**（`expected_tool` 是否被调 → 选择准确率 + 报错率，真实工具集见 `REAL_TOOLS`，过滤"提取关键词/检索知识库"伪工具）、**答案关键词命中**（`must_contain` 串匹配，免 LLM 的正确性代理）、**忠实度**（LLM-as-judge，复用 chat 模型判 faithfulness/relevance，**已排除 OOD** 以免无上下文失真）。
+
+- **标注集** `eval/agent_eval_set.json`：每条可含 `category`(rag/tool/policy/ood) / `relevant` / `expected_tool` / `must_contain`。
+- **开关**：`--retrieval-only`（只评检索+置信度，无需 chat Key）、`--no-judge`（跳过忠实度，省 token）、`--limit N`、`--verbose`。缺 chat Key 时自动降级为 retrieval-only。
+
+> **共同约定**：① 评测语料 = `docs/` + `wiki/`，**skill `references/`（政策文档）不在检索索引内**（`all_refs_dirs()` 返回 `[]`，靠 `load_policy_file` 按需读取）——`relevant` 别拿政策文档当 ground truth。② **隐私**：`eval_set.json` / `agent_eval_set.json` / `report*.json` 取自 `docs/` 私聊含真实客户姓名，已 gitignore（见 `eval/.gitignore`）**不入库**；仓库只保留脚本与脱敏示例 `*_set.example.json`。
