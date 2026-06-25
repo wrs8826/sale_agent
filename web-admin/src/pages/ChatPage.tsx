@@ -375,6 +375,13 @@ const ChatPage: React.FC = () => {
         signal: controller.signal,
       })
 
+      if (resp.status === 409) {
+        // 该会话已有生成/压缩在进行（多为另一设备/标签页或管理端）；本轮视为未发送，回滚用户气泡
+        const errData = await resp.json().catch(() => ({}))
+        showToast(errData.error || '该对话正在生成中，请先中断当前回答', 'error')
+        updateTab(tabId, t => ({ ...t, thinking: false, messages: t.messages.filter(m => m.id !== userMsg.id) }))
+        return
+      }
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
 
       const reader = resp.body!.getReader()

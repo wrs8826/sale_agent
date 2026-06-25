@@ -79,7 +79,7 @@ F:/销售agent/
 | `agent.py` | `POST /agent/chat`（SSE，QA 图驱动）+ `POST /feedback`（清洗子图） |
 | `knowledge.py` | `/files` CRUD、`POST /upload`（`ALLOWED_EXT`=.txt/.md/.rst/.html/.pdf/.docx）、`POST /ingest`（SSE，读取走 `extract_text_from_file`；清洗后纯文本回写原文件、PDF/.docx 二进制原件**不回写**以保留原文供 `read_document`；**不再自行 embed/写 Chroma**——嵌入索引归口到 `get_rag()` 重建，仅 `invalidate_rag()`）、`POST /query`、`POST /vectordb/clear`、`GET /download/<file>`（下载工具产物，防目录穿越）。**PDF/.docx 现已能进入混合检索**：`DocumentLoader` 重建索引时对二进制文档走 `extract_text_from_file`，`allowed_extensions` 含 `.pdf/.docx` |
 | `settings.py` | `GET/POST /settings` + `POST /settings/test`（四模型连通测试） |
-| `conversations.py` | 会话 CRUD + `/conversations/<id>/compact` + `compact_conversation()`（含两级压缩）；**按用户子目录隔离**（`conversations/<user_id>/<uuid>.json`），所有路由校验归属，admin 可跨用户访问 |
+| `conversations.py` | 会话 CRUD + `/conversations/<id>/compact` + `compact_conversation()`（头尾保留+中间折叠压缩）；**按用户子目录隔离**（`conversations/<user_id>/<uuid>.json`），所有路由校验归属，admin 可跨用户访问；**会话级单飞锁**（进程内 `threading.Lock`+跨进程 `filelock`）：`acquire_conversation`/`conversation_lock`，同会话同刻只允许一个生成/压缩/改删，取不到回 `409`（防并发丢更新 + 生成期间禁止再发，须先中断） |
 | `policy_skill.py` | **政策 skill 更新蓝图（仅 admin 端注册 + admin 角色校验）**：`/admin/policy-staging`（暂存列/删）、`/admin/policy-skill/draft`（SSE，复用清洗子图 + `policy_skill_maker` body 生成结构化草稿）、`/draft/<id>`（审核）、`/publish`（人工确认后落 `skills/`，备份旧件 + `load_skills(force=True)` 热重载 + 删暂存源与草稿）、`/discard`。agent 只产草稿不碰 live skills/；与 `/agent/chat` 完全隔离 |
 | `lark_agent.py` | 飞书蓝图：`GET /lark/status` + `POST /lark/chat` + SocketIO namespace `/lark` |
 | `socketio_instance.py` | 共享 SocketIO 实例（threading 模式），防循环导入 |

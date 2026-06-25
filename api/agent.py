@@ -53,9 +53,10 @@ _FEEDBACK_SYSTEM = (
 )
 
 
-def _compact_response(conversation_id: str, user_id: int) -> Response:
+def _compact_response(conversation_id: str, user_id: int, gate) -> Response:
     """SSE 包装：跑一次 L3 手动压缩（compact 命令），compact_done 事件回报结果。
 
+    `gate` 为已取得的会话锁（与生成单飞同一把），在生成器 finally 中释放。
     L3 保留尾部按"轮"且对齐发送窗口（conv_store.L3_KEEP_TAIL_TURNS）；手动与自动同为 L3，
     仅触发方式不同。会话短于保留窗口时返回 unchanged。
     """
@@ -85,6 +86,8 @@ def _compact_response(conversation_id: str, user_id: int) -> Response:
             yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         except Exception as exc:
             yield f"data: {json.dumps({'type':'error','message':str(exc)}, ensure_ascii=False)}\n\n"
+        finally:
+            gate.release()
 
     return Response(
         stream_with_context(gen()),
@@ -121,7 +124,12 @@ def agent_chat():
         if conv is None:
             return jsonify({"error": "会话不存在或已被删除"}), 404
         owner_id = int(conv.get("user_id") or user_id)
-        return _compact_response(conversation_id, owner_id)
+        # 单飞：压缩与该会话的生成/另一次压缩互斥；取不到锁回 409
+        try:
+            gate = conv_store.acquire_conversation(conversation_id, owner_id, wait=conv_store.CHAT_LOCK_WAIT)
+        except conv_store.ConversationBusy:
+            return jsonify({"error": "该对话正在生成或压缩中，请先中断或稍后再试"}), 409
+        return _compact_response(conversation_id, owner_id, gate)
 
     # conversation_id 提供时，以服务端持久化的历史为准（多会话隔离的关键）
     if conversation_id and user_id is not None:
@@ -224,6 +232,18 @@ def agent_chat():
         "max_tool_rounds": 15,                # react 模式最大工具调用轮数
         "enable_planning": services.get_plan_first(),  # react：执行前先列方案（任务拆分）
     }
+
+    # ── 单飞守卫：同一会话同一时刻只允许一个生成在跑 ───────────────────────
+    # 取不到锁（已有生成/压缩进行中，可能来自另一标签页/设备或管理端）→ 409，
+    # 前端提示「请先中断当前回答」。锁贯穿整段流式持有，于生成器 finally 释放
+    # （正常结束 / 异常 / 用户中断断开 SSE 都会释放）。匿名/无会话不加锁。
+    gate = None
+    if conversation_id and owner_id is not None:
+        try:
+            gate = conv_store.acquire_conversation(
+                conversation_id, owner_id, wait=conv_store.CHAT_LOCK_WAIT)
+        except conv_store.ConversationBusy:
+            return jsonify({"error": "该对话正在生成中，请先中断当前回答或稍后再试"}), 409
 
     def generate():
         full_text = ""
@@ -343,8 +363,16 @@ def agent_chat():
             except Exception as exc:
                 yield f"data: {json.dumps({'type':'error','message':f'会话落盘失败: {exc}'}, ensure_ascii=False)}\n\n"
 
+    def _streamed():
+        # 包一层确保单飞锁在所有收尾路径（完成/异常/客户端中断 GeneratorExit）都释放
+        try:
+            yield from generate()
+        finally:
+            if gate is not None:
+                gate.release()
+
     return Response(
-        stream_with_context(generate()),
+        stream_with_context(_streamed()),
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

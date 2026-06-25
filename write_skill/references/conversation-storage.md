@@ -72,6 +72,8 @@ append_turn(cid, user_id, user_text, assistant_text, tool_items=None) -> Optiona
 get_history(cid: str, user_id: int) -> List[Dict]   # 头部原文 + [中间历史摘要] + 尾部原文；tool 消息原样回放（含 name）
 should_auto_compact(cid, user_id, keep_head_turns=3, keep_tail_turns=10, margin=4) -> bool  # 主触发：逐字轮数 > 头+尾+余量
 compact_conversation(cid, user_id, cleaner_cfg, keep_tail_turns, keep_head_turns=3) -> Dict   # 折中间段、保首尾，均按轮
+acquire_conversation(cid, user_id, wait=0.0) -> _ConvGate   # 取会话锁；超时抛 ConversationBusy；调用方负责 .release()
+conversation_lock(cid, user_id, wait=0.0)                   # 上下文管理器版（自包含读改写用）
 ```
 
 ## 自动新建会话（agent.py 行为）
@@ -98,7 +100,36 @@ tmp.write_text(json.dumps(conv, ...), encoding="utf-8")
 tmp.replace(fp)
 ```
 
-避免半写损坏。
+避免半写损坏。但原子写只防"写出半个文件"，**不防并发丢更新**（两个 load→改→save 互相覆盖）——见下。
+
+## 并发：会话级单飞锁（防丢更新 + 中断丢弃）
+
+`load→改→save` 的读改写在并发下会互相覆盖。**双进程**（`app_user` 5001 / `app_admin` 5002 同写一份会话文件，如 admin 压缩用户会话而用户正在聊）使纯进程内锁不够，故用**进程内 `threading.Lock` + 跨进程 `filelock`** 的每会话锁。
+
+- **粒度**：每会话一把（key=`<user_id>/<cid>`，锁文件 `<cid>.json.lock`）。不同会话/用户互不阻塞。只锁写，不锁读（读配合原子写恒读到完整旧/新版）。
+- **只在 4 个入口加锁**（`/agent/chat` 生成、`compact` 命令、`POST /compact`、`PATCH`/`DELETE`），核心读写函数本身不取锁 → **无嵌套、无重入需求**，threading.Lock（非重入）即安全。
+- **单飞**：`/agent/chat` 入口 `acquire_conversation(cid, owner_id, wait=CHAT_LOCK_WAIT=10)`，锁贯穿整段 SSE，于外层 `_streamed()` 的 `finally` 释放（完成/异常/客户端断开 `GeneratorExit` 均释放）。取不到 → `409`。`wait=10` 覆盖"中断后立刻重发"时上一请求的释放窗口；真并发（另一设备/管理端）等满 10s → 409。
+- **中断 = 丢弃**：用户点停止 → 前端 abort SSE → 服务端下一次 yield 抛 `GeneratorExit` → 进 finally 放锁；因**未走到 `append_turn`**，本轮 user+assistant 整体不落盘（与"持久化只在 done 后"天然一致）。中途的自动压缩若已落盘则保留（与当前轮无关）。
+- **降级**：未装 `filelock` → 仅进程内锁 + 告警（单进程仍互斥，跨进程不互斥）。进程崩溃时 OS 自动释放文件锁，无死锁残留。
+- **飞书不涉及**：飞书走 `lark_history`、无 UI 中断概念，本机制不覆盖（如需并发安全另议串行锁）。
+
+```python
+# /agent/chat 入口（视图取锁、生成器释放）
+gate = None
+if conversation_id and owner_id is not None:
+    try:
+        gate = conv_store.acquire_conversation(conversation_id, owner_id, wait=conv_store.CHAT_LOCK_WAIT)
+    except conv_store.ConversationBusy:
+        return jsonify({"error": "该对话正在生成中，请先中断当前回答或稍后再试"}), 409
+def _streamed():
+    try:
+        yield from generate()       # 内部 append_turn/compact 均在此锁内，无需再取
+    finally:
+        if gate is not None:
+            gate.release()
+```
+
+前端（`web/user.html` + `web-admin/ChatPage.tsx`）：流式中禁用 Enter、发送键变「停止/⏹」（点击 abort）、收到 `409` 回滚乐观插入的用户气泡并 toast。两端本就「一会话只在一个标签打开」「streaming 时不发新消息」，409 仅兜底跨设备/管理端。
 
 ## 工具轮持久化（Phase 0，四级压缩方案的地基）
 
@@ -236,6 +267,8 @@ def generate():
 2. **切换会话不串数据**：fetch `/conversations/<id>` 后必须清空再渲染
 3. **服务端是历史的权威源**：`/agent/chat` 提供 `conversation_id` 时忽略客户端传的 `history`
 4. **compact 命令不持久化**：跳过 `append_turn`
+5. **会话级单飞**：同一会话同一时刻只允许一个生成/压缩/改名/删除；写入口必须取会话锁，取不到回 `409`，绝不并发读改写同一会话文件
+6. **取锁与释放对称**：视图里 `acquire_conversation` 成功后，必须保证所有收尾路径都 `release`（生成器用 `finally`；崩溃靠 OS 释放文件锁）
 
 ## 给反馈用的"完整历史"
 

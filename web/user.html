@@ -1780,6 +1780,15 @@ async function doSend() {
       signal: controller.signal,
     });
 
+    if (res.status === 409) {
+      // 该会话已有生成在进行（多为另一设备/标签页）；本轮视为未发送，回滚用户气泡
+      const err = await res.json().catch(() => ({}));
+      toast(err.error || '该对话正在生成中，请先中断当前回答', 'warning');
+      t.messages = t.messages.filter(x => x.id !== userMsgId);
+      if (tabId === activeTabId) chatBody.querySelector(`[data-msg-id="${userMsgId}"]`)?.remove();
+      return;
+    }
+
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       const errMsg = err.error || ('HTTP ' + res.status);

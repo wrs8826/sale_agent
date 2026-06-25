@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -41,6 +43,15 @@ from flask import Blueprint, current_app, jsonify, request, session
 from agent_service import CONVERSATIONS_DIR
 from agent_service.graph import build_cleaning_graph
 from . import conv_stats
+
+# 跨进程文件锁（app_user / app_admin 是两个进程，会同写同一会话文件）。
+# 缺失时降级为「仅进程内 threading 锁」并告警——功能可用，但跨进程不互斥。
+try:
+    from filelock import FileLock, Timeout as _FileLockTimeout
+    _HAS_FILELOCK = True
+except Exception:  # pragma: no cover - 依赖缺失时的兜底
+    _HAS_FILELOCK = False
+    print("[conversations] 未安装 filelock，会话锁降级为仅进程内（跨进程不互斥）")
 
 bp = Blueprint("conversations", __name__)
 
@@ -100,6 +111,108 @@ def _user_dir(user_id: int) -> Path:
 def _path(cid: str, user_id: int) -> Path:
     """返回会话文件的绝对路径。"""
     return _user_dir(user_id) / f"{cid}.json"
+
+
+# ── 会话级互斥锁（单飞 + 防并发丢更新）──────────────────────────────────────
+# 同一会话同一时刻只允许一个「生成/压缩/改名/删除」在跑：
+#   · /agent/chat 入口取锁、贯穿整段流式持有，第二个并发请求取不到 → 409；
+#     用户须先「中断」当前回答（前端断开 SSE → 服务端 finally 放锁）才能再发。
+#   · 进程内用 threading.Lock，进程间用 filelock（app_user/app_admin 互斥）。
+# 锁只加在 4 个入口（chat / compact / rename / delete），核心读写函数本身不取锁，
+# 故无嵌套、无重入需求；非阻塞或短等待取不到即抛 ConversationBusy。
+CHAT_LOCK_WAIT = 10.0     # /agent/chat 取锁最长等待秒数（覆盖「中断后立刻重发」的释放窗口）
+MUTATE_LOCK_WAIT = 8.0    # 压缩 / 改名 / 删除取锁最长等待秒数
+
+_tlocks: Dict[str, threading.Lock] = {}
+_flocks: Dict[str, "FileLock"] = {}
+_locks_guard = threading.Lock()
+
+
+class ConversationBusy(Exception):
+    """会话已有进行中的生成/压缩，未能在等待时限内取得锁（调用方应回 409）。"""
+
+
+def _get_tlock(key: str) -> threading.Lock:
+    with _locks_guard:
+        lk = _tlocks.get(key)
+        if lk is None:
+            lk = threading.Lock()
+            _tlocks[key] = lk
+        return lk
+
+
+def _get_flock(safe_cid: str, user_id: int):
+    if not _HAS_FILELOCK:
+        return None
+    d = _user_dir(int(user_id))
+    d.mkdir(parents=True, exist_ok=True)
+    path = str(d / f"{safe_cid}.json.lock")
+    with _locks_guard:
+        fl = _flocks.get(path)
+        if fl is None:
+            fl = FileLock(path)
+            _flocks[path] = fl
+        return fl
+
+
+class _ConvGate:
+    """已取得的会话锁句柄；持有方负责调用一次 .release()（幂等）。"""
+
+    def __init__(self, tlock: threading.Lock, flock):
+        self._tlock = tlock
+        self._flock = flock
+        self._released = False
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        if self._flock is not None:
+            try:
+                if self._flock.is_locked:
+                    self._flock.release()
+            except Exception:
+                pass
+        try:
+            self._tlock.release()
+        except Exception:
+            pass
+
+
+def acquire_conversation(cid: str, user_id: Optional[int], wait: float = 0.0) -> _ConvGate:
+    """取得会话级互斥锁；wait 秒内取不到 → 抛 ConversationBusy。调用方负责 release()。
+
+    供 /agent/chat 这类「视图取锁、生成器里释放」的跨边界场景使用。
+    """
+    safe = _safe_id(cid)
+    if not safe or user_id is None:
+        raise ConversationBusy("无效会话")
+    key = f"{int(user_id)}/{safe}"
+    tlock = _get_tlock(key)
+    got = tlock.acquire(timeout=wait) if wait and wait > 0 else tlock.acquire(blocking=False)
+    if not got:
+        raise ConversationBusy("会话正忙")
+    flock = _get_flock(safe, int(user_id))
+    if flock is not None:
+        try:
+            flock.acquire(timeout=wait if wait and wait > 0 else 0)
+        except _FileLockTimeout:
+            tlock.release()
+            raise ConversationBusy("会话正忙（其它进程占用）")
+        except Exception:
+            # filelock 自身异常不应阻断主流程：降级为仅进程内锁
+            flock = None
+    return _ConvGate(tlock, flock)
+
+
+@contextmanager
+def conversation_lock(cid: str, user_id: Optional[int], wait: float = 0.0):
+    """会话锁上下文管理器：用于单函数内自包含的读改写（压缩/改名/删除）。"""
+    gate = acquire_conversation(cid, user_id, wait=wait)
+    try:
+        yield
+    finally:
+        gate.release()
 
 
 # ── CRUD 基础函数 ─────────────────────────────────────────────────────────────
@@ -579,9 +692,17 @@ def rename_conversation(cid: str):
     new_title = (data.get("title") or "").strip()
     if not new_title:
         return jsonify({"error": "title 不能为空"}), 400
-    conv["title"] = new_title[:_TITLE_MAX]
-    conv["updated_at"] = _now()
-    save_conversation(conv)
+
+    owner_id = int(conv.get("user_id") or uid)
+    try:
+        with conversation_lock(cid, owner_id, wait=MUTATE_LOCK_WAIT):
+            fresh = load_conversation(cid, owner_id) or conv   # 锁内重读，防丢更新
+            fresh["title"] = new_title[:_TITLE_MAX]
+            fresh["updated_at"] = _now()
+            save_conversation(fresh)
+            conv = fresh
+    except ConversationBusy:
+        return jsonify({"error": "该对话正在生成中，请稍后重试"}), 409
     return jsonify(_summary(conv))
 
 
@@ -605,10 +726,17 @@ def delete_conversation(cid: str):
     owner_id = conv.get("user_id")
     if owner_id is not None:
         fp = _path(safe, int(owner_id))
+        try:
+            # 取锁后再删，避免删到一半另有生成在写（写回会复活僵尸文件）
+            with conversation_lock(safe, int(owner_id), wait=MUTATE_LOCK_WAIT):
+                if fp.is_file():
+                    fp.unlink()
+        except ConversationBusy:
+            return jsonify({"error": "该对话正在生成中，请先中断或稍后再删除"}), 409
     else:
-        fp = CONVERSATIONS_DIR / f"{safe}.json"  # 老格式
-    if fp.is_file():
-        fp.unlink()
+        fp = CONVERSATIONS_DIR / f"{safe}.json"  # 老格式（无 user_id，无法定位锁）
+        if fp.is_file():
+            fp.unlink()
     return jsonify({"ok": True})
 
 
@@ -631,7 +759,12 @@ def compact_endpoint(cid: str):
     data = request.get_json(silent=True) or {}
     keep = int(data.get("keep_tail_turns", L3_KEEP_TAIL_TURNS))
     cleaner_cfg = services.load_cleaner_settings()
-    result = compact_conversation(cid, owner_id, cleaner_cfg, keep_tail_turns=keep)
+    try:
+        # 取锁压缩：避免与同会话的生成/另一次压缩并发（跨进程也互斥）
+        with conversation_lock(cid, owner_id, wait=MUTATE_LOCK_WAIT):
+            result = compact_conversation(cid, owner_id, cleaner_cfg, keep_tail_turns=keep)
+    except ConversationBusy:
+        return jsonify({"error": "该对话正在生成中，请先中断或稍后再压缩"}), 409
     if "error" in result:
         return jsonify({"error": result["error"]}), 400
     return jsonify(result)
