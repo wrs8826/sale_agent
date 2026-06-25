@@ -32,6 +32,10 @@ _DEFAULT_SOURCE_WEIGHTS = {"docs": 1.0, "wiki": 0.7, "skill": 1.0}
 # ── 三段 API 配置兜底默认 ─────────────────────────────────────────────────────
 _DEFAULT_QWEN_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 _DEFAULT_CHAT = {"api_key": "", "base_url": _DEFAULT_QWEN_BASE, "model_name": "qwen3-max"}
+# 推理模式默认开启（保持历史行为，零回归）。config.yaml 的 chat.enable_reasoning 显式置 false 才关闭。
+_DEFAULT_ENABLE_REASONING = True
+# 思考强度（reasoning_effort）默认空 = 不发送、用模型默认强度。仅推理开启时生效。
+_DEFAULT_REASONING_EFFORT = ""
 _DEFAULT_CLEANER: Dict[str, str] = {"api_key": "", "base_url": "", "model_name": ""}
 _DEFAULT_RERANKER = {"api_key": "", "base_url": "", "model_name": "gte-rerank-v2"}
 _DEFAULT_EMBEDDING = {"api_key": "", "base_url": "", "model_name": "text-embedding-v4"}
@@ -115,11 +119,17 @@ def _legacy_api_key() -> str:
     return os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY") or ""
 
 
-def load_chat_settings() -> Dict[str, str]:
-    """返回解密后的 chat 段（api_key/base_url/model_name 三键齐全）。"""
+def load_chat_settings() -> Dict[str, Any]:
+    """返回解密后的 chat 段（api_key/base_url/model_name 三键齐全 + enable_reasoning 布尔）。"""
     raw = _read_raw_yaml().get("chat") or {}
-    merged = _merge(_DEFAULT_CHAT, raw)
+    merged: Dict[str, Any] = _merge(_DEFAULT_CHAT, raw)
     merged["api_key"] = decrypt(merged["api_key"]) or _legacy_api_key()
+    # enable_reasoning 是布尔开关，不走只搬 3 个字符串键的 _merge，单独读取并兜底默认。
+    val = raw.get("enable_reasoning")
+    merged["enable_reasoning"] = _DEFAULT_ENABLE_REASONING if val is None else bool(val)
+    # reasoning_effort 思考强度（"low"/"medium"/"high"/"max" 等，空=不发送），同样单独读取。
+    eff = raw.get("reasoning_effort")
+    merged["reasoning_effort"] = str(eff).strip() if eff else _DEFAULT_REASONING_EFFORT
     return merged
 
 

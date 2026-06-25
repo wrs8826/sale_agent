@@ -170,11 +170,15 @@ class MCPManager:
         from langgraph.prebuilt import create_react_agent
         from langchain_core.messages import SystemMessage
 
+        from agent_service.graph.qa.nodes import llm_tuning_kwargs
+
+        # 推理模式开关 + temperature 与网页端 graph/qa/nodes._build_llm 共用同一逻辑：
+        # 思考模式下 temperature 不生效，故仅在关闭推理时由 helper 设 temperature=0。
         llm = ChatOpenAI(
             model=chat_cfg["model_name"],
             api_key=chat_cfg["api_key"],
             base_url=chat_cfg["base_url"] or None,
-            temperature=0,
+            **llm_tuning_kwargs(chat_cfg),
         )
         # 合并 MCP 工具 + 额外注入的用户级工具
         all_tools = list(self._tools) + list(extra_tools)

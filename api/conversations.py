@@ -10,8 +10,9 @@
         "title":      "首条用户消息截取的标题（可改名）",
         "created_at": "ISO-8601",
         "updated_at": "ISO-8601",
-        "summary":    "已压缩部分的事实摘要（空表示从未压缩）",
-        "compact_at": <int>,           ← messages 数组中第一条未压缩消息的下标
+        "summary":    "中间折叠段的事实摘要（空表示从未压缩）",
+        "compact_at": <int>,           ← 中间折叠段的末尾下标：messages[head_end:compact_at] 已折进 summary，
+                                          messages[:head_end]（头部）与 messages[compact_at:]（尾部）逐字保留
         "messages":   [ {role, content, ts}, ... ]
     }
 
@@ -45,17 +46,24 @@ bp = Blueprint("conversations", __name__)
 
 
 # ── 压缩相关常量 ─────────────────────────────────────────────────────────────
-MAX_CONTEXT_TOKENS = 1_000_000   # L3 预算（模型上下文 1M）；活跃区 token 超 80% 自动压缩
+MAX_CONTEXT_TOKENS = 1_000_000   # token 兜底预算（模型上下文 1M）；活跃区 token 超 80% 时即便轮数不够也强制压缩
 COMPACT_THRESHOLD = 0.80
 TOOL_STORE_MAX = 4000   # 工具结果落盘截断上限（控存储/回放体积；Phase 0 工具轮持久化）
 # 发送态裁剪（Phase 1/2，不动存储，UI 仍可见全部）
-SEND_WINDOW_TURNS = 20        # L1：每次最多发最近 N 轮（以 user 消息为轮边界）；摘要恒前置
+SEND_WINDOW_TURNS = 20        # L1：每次最多发最近 N 轮（以 user 消息为轮边界）；摘要恒前置——压缩已把活跃区压到 ~头+尾，此项仅兜底
 TOOL_KEEP_RECENT_TURNS = 10   # L2：窗口内仅最近 M 轮保留工具消息，更早的工具消息剪掉
-# L3 滚动摘要：手动 compact 与自动阈值压缩统一为 L3，保留尾部按"轮"且对齐发送窗口
-L3_KEEP_TAIL_TURNS = SEND_WINDOW_TURNS   # 保留最近 N 轮原文，更早的折进 summary（=窗口，发送/存储一致）
-# L4 熔断：自动 L3 累计达 CIRCUIT_BREAK_AFTER 次时，本次改为全局强压（keep_tail=0 全折进摘要）并清零计数
+# 头尾保留 + 中间折叠（核心方案）：压缩后逐字保留「最初 HEAD 轮 + 最近 TAIL 轮」，中间段折进 summary。
+# 头部 = 用户最初的任务/背景锚点，尾部 = 近期上下文，被丢弃的中间一定先进摘要（杜绝静默丢失）。
+HEAD_KEEP_TURNS = 3
+TAIL_KEEP_TURNS = 10
+# 主触发：逐字（未折叠）轮数 > HEAD+TAIL+MARGIN 时自动压缩。留余量是为批量折叠，避免一过线就每轮调 LLM。
+AUTO_COMPACT_MARGIN = 4
+# L3 滚动摘要：手动 compact 与自动压缩统一为 L3，保留尾部按"轮"；头部由 compact 算法结构性保留。
+L3_KEEP_TAIL_TURNS = TAIL_KEEP_TURNS
+# L4 熔断：自动压缩累计达 CIRCUIT_BREAK_AFTER 次时清零计数并发 circuit_break 事件（"压缩频繁"提示）。
+# 头尾方案下尾部恒保留，故 L4 不再清空尾部（=L3 的保留口径），仅承担提示 + 计数复位职责。
 CIRCUIT_BREAK_AFTER = 3
-L4_KEEP_TAIL_TURNS = 0
+L4_KEEP_TAIL_TURNS = TAIL_KEEP_TURNS
 
 COMPACT_SYSTEM = (
     "你是对话历史压缩助手。请把下方对话整理为简明扼要的事实摘要：\n"
@@ -203,25 +211,83 @@ def append_turn(
     return conv
 
 
+def _msg_view(m: Dict) -> Dict[str, str]:
+    """把存储态消息投影成发送态视图（tool 保留 name，其余仅 role/content）。"""
+    role = m.get("role", "user")
+    if role == "tool":
+        return {"role": "tool", "name": m.get("name", ""), "content": m.get("content", "")}
+    return {"role": role, "content": m.get("content", "")}
+
+
+def _turn_end_index(messages: List[Dict], keep_head_turns: int) -> int:
+    """返回「最初 keep_head_turns 轮」之后的下标（轮 = 以 user 消息为边界）。
+
+    - keep_head_turns <= 0      → 0（无头部）
+    - 总轮数 <= keep_head_turns  → len(messages)（全部都算头部）
+    - 否则 → 第 keep_head_turns+1 个 user 消息的下标（= 头部末尾，恰在第 4 轮 user 之前）
+    """
+    if keep_head_turns <= 0:
+        return 0
+    user_idx = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+    if len(user_idx) <= keep_head_turns:
+        return len(messages)
+    return user_idx[keep_head_turns]
+
+
 def get_history(cid: str, user_id: int) -> List[Dict[str, str]]:
     """给 /agent/chat 用：返回 [{role, content}, ...]。
-    若已压缩，在历史前插入 system 摘要消息。
+
+    压缩后按**时间顺序**拼成「最初 HEAD 轮原文 + [中间历史摘要] + 最近 TAIL 轮原文」：
+    summary 只覆盖中间被折叠的部分，头尾原文逐字保留——任何被折叠的内容都已进摘要，
+    不会静默丢失。未压缩（compact_at=0）时原样回放全部消息。
     """
     conv = load_conversation(cid, user_id)
     if conv is None:
         return []
-    history: List[Dict[str, str]] = []
+    messages = conv.get("messages", [])
     summary = (conv.get("summary") or "").strip()
-    if summary:
-        history.append({"role": "system", "content": f"[历史摘要]\n{summary}"})
     compact_at = int(conv.get("compact_at", 0) or 0)
-    for m in conv.get("messages", [])[compact_at:]:
-        role = m.get("role", "user")
-        if role == "tool":
-            history.append({"role": "tool", "name": m.get("name", ""), "content": m.get("content", "")})
-        else:
-            history.append({"role": role, "content": m.get("content", "")})
+
+    # 从未压缩（或异常无摘要）→ 原样回放全部消息
+    if compact_at <= 0 or not summary:
+        history: List[Dict[str, str]] = []
+        if summary:
+            history.append({"role": "system", "content": f"[历史摘要]\n{summary}"})
+        history.extend(_msg_view(m) for m in messages)
+        return history
+
+    # 已压缩 → 头部原文 + 中间摘要 + 尾部原文（compact_at 标记中间折叠段的末尾）
+    head_end = min(_turn_end_index(messages, HEAD_KEEP_TURNS), compact_at)
+    history = [_msg_view(m) for m in messages[:head_end]]
+    history.append({"role": "system", "content": f"[中间历史摘要]\n{summary}"})
+    history.extend(_msg_view(m) for m in messages[compact_at:])
     return history
+
+
+def should_auto_compact(
+    cid: str,
+    user_id: int,
+    keep_head_turns: int = HEAD_KEEP_TURNS,
+    keep_tail_turns: int = TAIL_KEEP_TURNS,
+    margin: int = AUTO_COMPACT_MARGIN,
+) -> bool:
+    """主触发判定：逐字（未折叠）轮数是否超过 头+尾+余量。
+
+    逐字轮数 = 头部恒保留的 keep_head_turns 轮 + 当前 compact_at 之后的尾部轮数；
+    未压缩时即全部轮数。超过阈值说明中间已积累出可折叠的一段，应触发压缩。
+    """
+    conv = load_conversation(cid, user_id)
+    if conv is None:
+        return False
+    messages = conv.get("messages", [])
+    compact_at = int(conv.get("compact_at", 0) or 0)
+    user_idx = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+    if compact_at <= 0:
+        verbatim = len(user_idx)
+    else:
+        tail_turns = sum(1 for i in user_idx if i >= compact_at)
+        verbatim = min(keep_head_turns, len(user_idx)) + tail_turns
+    return verbatim > keep_head_turns + keep_tail_turns + margin
 
 
 def window_history(
@@ -231,17 +297,26 @@ def window_history(
 ) -> List[Dict]:
     """发送态裁剪（Phase 1 L1 窗口 + Phase 2 L2 工具裁剪）。
 
-    输入 `history` 为 `get_history()` 的完整活跃区（含可能的前置 system 摘要）。
+    输入 `history` 为 `get_history()` 的输出（头部原文 + [中间历史摘要] + 尾部原文）。
     本函数**不改存储**，只决定"这一轮真正发给模型的消息"：
-      L1：以 user 消息为轮边界，仅保留最近 `window_turns` 轮；前置 system 摘要恒保留。
+      L1：以 user 消息为轮边界，仅保留最近 `window_turns` 轮。压缩后活跃区仅 ~头+尾(≈13)
+          轮 < `window_turns`，故此项通常不裁剪，仅在压缩失败/未跑时兜底。
       L2：在窗口内，距今超过 `tool_keep_turns` 轮的 `role=tool` 消息剪掉（仅留 user/assistant）。
 
     轮边界定义：每条 user 消息开启一轮，其后的 tool/assistant 消息属于该轮。
+    注：中间摘要 `system` 消息位于头部之后（非下标 0），不是 user/tool，既不计入轮数也不会被
+    L2 剪掉。常态下活跃区 < `window_turns`，L1 不裁剪、摘要原位保留；极端降级（压缩长期失败、
+    活跃区涨过窗口）下 L1 可能裁掉头部连带摘要，此时末尾兜底把摘要前置回插，确保永不丢失。
     """
     if not history:
         return history
 
-    # 前置 system 摘要（get_history 恒放最前）始终保留，不计入窗口轮数
+    # 记录所有 system 摘要消息（压缩态它在中部）：若 L1 窗口把头部连同摘要一起裁掉，
+    # 末尾兜底回插，确保「中间历史摘要」在任何情况下都不丢（含 LLM 长期不可用、活跃区
+    # 涨过窗口的降级场景）。
+    summary_msgs = [m for m in history if m.get("role") == "system"]
+
+    # 仅当历史首条就是 system（未压缩态偶发的前置摘要）时单独摘出不计轮。
     head: List[Dict] = []
     body = history
     if history[0].get("role") == "system":
@@ -261,7 +336,12 @@ def window_history(
     tool_cutoff = user_pos[len(user_pos) - tool_keep_turns] if len(user_pos) > tool_keep_turns else 0
     trimmed = [m for i, m in enumerate(body) if not (m.get("role") == "tool" and i < tool_cutoff)]
 
-    return head + trimmed
+    result = head + trimmed
+    # 兜底：被 L1 裁掉的摘要前置回插（常态无裁剪时摘要仍在 result 中，不会重复）
+    for sm in summary_msgs:
+        if sm not in result:
+            result = [sm] + result
+    return result
 
 
 # ── token 估算（Phase 3：委托到官方 DeepSeek 分词器，不可用时内部降级粗估）──────
@@ -313,10 +393,13 @@ def compact_conversation(
     user_id: int,
     cleaner_cfg: Dict[str, str],
     keep_tail_turns: int,
+    keep_head_turns: int = HEAD_KEEP_TURNS,
 ) -> Dict:
-    """对单个会话执行 L3 压缩：把"超出最近 keep_tail_turns 轮"的内容折进 summary。
+    """对单个会话执行 L3 压缩：折叠**中间段**进 summary，结构性保留首尾原文。
 
-    keep_tail_turns 按**轮**（user 边界）计；=0 时压缩全部活跃区（L4 熔断）。
+    保留 = 最初 keep_head_turns 轮（头部锚点）+ 最近 keep_tail_turns 轮（近期上下文）；
+    折叠 = 二者之间的中间轮。keep_tail_turns / keep_head_turns 均按**轮**（user 边界）计。
+    头部由 `fold_from = max(compact_at, head_end)` 保证永不被折叠。
 
     返回：
       {"ok": True, "summary": str, "compacted_count": int, "kept_count": int}
@@ -331,12 +414,14 @@ def compact_conversation(
     compact_at = int(conv.get("compact_at", 0) or 0)
     prior_summary = (conv.get("summary") or "").strip()
 
+    head_end = _turn_end_index(messages, keep_head_turns)
     tail_start = _tail_start_by_turns(messages, keep_tail_turns)
+    fold_from = max(compact_at, head_end)   # 头部永不折叠；已折叠部分从 compact_at 续上
 
-    if tail_start <= compact_at:
+    if tail_start <= fold_from:
         return {"unchanged": True, "reason": "对话过短，无需压缩"}
 
-    to_compact = messages[compact_at:tail_start]
+    to_compact = messages[fold_from:tail_start]
     raw = _format_for_compaction(prior_summary, to_compact)
     if not raw.strip():
         return {"unchanged": True, "reason": "无新内容可压缩"}
@@ -364,8 +449,8 @@ def compact_conversation(
     return {
         "ok": True,
         "summary": new_summary,
-        "compacted_count": tail_start - compact_at,
-        "kept_count": len(messages) - tail_start,
+        "compacted_count": tail_start - fold_from,            # 本轮折进摘要的消息数
+        "kept_count": head_end + (len(messages) - tail_start),  # 逐字保留的头+尾消息数
     }
 
 

@@ -10,6 +10,8 @@ chat:
   base_url: "https://api.deepseek.com"
   model_name: "deepseek-v4-pro"
   rag_score_threshold: 0.3       # RAG 命中分数门限；由 services.load_rag_threshold() 读取，低于该值回退会话上下文作答
+  enable_reasoning: true         # 推理模式开关；由 load_chat_settings() 带出到 chat_cfg，false 时按 base_url 选关推理参数（DeepSeek: {"thinking":{"type":"disabled"}} / Qwen: {"enable_thinking":false}）
+  reasoning_effort: ""           # 思考强度（low/medium/high/max，空=模型默认）；仅 enable_reasoning=true 时生效，走 extra_body={"reasoning_effort":...}
 
 cleaner:
   api_key: ""                    # 空 = 继承 chat
@@ -122,6 +124,14 @@ mask(plaintext: str) -> str           # "sk-******1234"，给前端显示
 6. 前端 `fillForm()` / `saveSettings()` 不用改（自动按 `data-section/data-field` 取所有 input）
 
 > 例外：`chat.rag_score_threshold` 虽写在 `chat:` 段下，但**不走 `load_chat_settings()`**，而是由专用读取器 `services.load_rag_threshold()` 直接读原始 yaml（缺省 0.3）。这类"挂在某段下、却由专用 reader 消费"的字段，加的时候照它的模式（写 reader + 消费处调 reader），别指望 `load_chat_settings()` 自动带出来。
+
+> 非字符串字段：`_merge()` 只搬 `api_key/base_url/model_name` 三个字符串键，布尔/数值开关搬不出来。`chat.enable_reasoning`（推理模式开关）的做法是**在 `load_chat_settings()` 里 `_merge` 之后单独读一次并 `bool()` 兜底**，塞进返回的 `chat_cfg`，这样所有 `_build_llm(chat_cfg)` 调用方（call_tools/extract/generate/agent_react）和 `mcp_manager` 都能拿到。默认 `_DEFAULT_ENABLE_REASONING=True`（零回归）；调参由 `nodes.llm_tuning_kwargs(chat_cfg)` 统一产出：
+- **推理开启（默认）**：配了 `reasoning_effort` → `extra_body={"reasoning_effort": "..."}`（思考强度，OpenAI 格式，DeepSeek 支持）；没配则不附加任何参数。思考模式下 `temperature/top_p/presence_penalty/frequency_penalty` 不生效（DeepSeek 文档：设置不报错但被忽略），故不设 temperature。
+- **推理关闭**：按 `base_url` 选关推理参数（DeepSeek→`extra_body={"thinking":{"type":"disabled"}}`，DashScope/Qwen→`extra_body={"enable_thinking":False}`）**并设 `temperature=0`**；此时 `reasoning_effort` 无意义、不发送。
+
+`_build_llm` 与 `mcp_manager` 共用该 helper，新增厂商/调参只改这一个函数。
+
+> **reasoning_content 不变量**：`nodes._history_to_messages` 刻意把历史工具轮扁平成 system 文本、不回放 `assistant.tool_calls`。DeepSeek 思考模式要求"有工具调用的轮次必须回传 `reasoning_content`"，而我们不持久化它——扁平化让 API 看不到悬空 tool_calls，从而规避该约束。**别把历史改成回放真 tool_calls**，否则思考模式下多轮会因缺 reasoning_content 出问题。
 
 ### 场景 1.5：加一个"非 RAG 的顶层编排开关"（如 `agent_mode` / `enable_planning`）
 

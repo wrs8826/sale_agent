@@ -228,19 +228,23 @@ def agent_chat():
     def generate():
         full_text = ""
 
-        # ── 二级压缩：估算 token，超 80% 上限自动压缩历史 ──────────────────
+        # ── 自动压缩：折叠中间段、保留首尾原文 ────────────────────────────
+        # 主触发：逐字（未折叠）轮数超过 头+尾+余量（中间已积出可折叠段）；
+        # 次触发：活跃区 token 仍超 80% 上限（单轮超长等极端情况兜底）。
         if conversation_id and owner_id is not None:
             threshold = int(conv_store.MAX_CONTEXT_TOKENS * conv_store.COMPACT_THRESHOLD)
             tokens = conv_store.estimate_history_tokens(state["history"]) + conv_store.estimate_tokens(message)
-            if tokens > threshold:
-                # L4 熔断：本次若是第 CIRCUIT_BREAK_AFTER 次自动压缩，则改为全局强压（keep_tail=0）
+            turn_trigger = conv_store.should_auto_compact(conversation_id, owner_id)
+            if turn_trigger or tokens > threshold:
+                # L4 熔断：本次若是第 CIRCUIT_BREAK_AFTER 次自动压缩，则清零计数并发 circuit_break 事件
                 prior = conv_stats.get_compact_count(owner_id, conversation_id)
                 is_circuit = (prior + 1) >= conv_store.CIRCUIT_BREAK_AFTER
-                stage = "熔断·全局强制压缩" if is_circuit else "自动压缩"
+                stage = "熔断·重置压缩计数" if is_circuit else "自动压缩"
+                why = "中间历史" if turn_trigger else f"约 {tokens} tokens"
                 yield (
                     "data: " + json.dumps({
                         "type": "status",
-                        "message": f"对话历史约 {tokens} tokens，超过 {int(conv_store.COMPACT_THRESHOLD*100)}% 阈值，正在{stage}…",
+                        "message": f"对话历史（{why}）触发{stage}，正在折叠中间段、保留首尾原文…",
                     }, ensure_ascii=False) + "\n\n"
                 )
                 cleaner_cfg = services.load_cleaner_settings()

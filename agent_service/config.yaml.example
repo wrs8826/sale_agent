@@ -69,6 +69,11 @@ chat:
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   model_name: "qwen-plus-2025-07-28"
   rag_score_threshold: 0.3
+  # 推理模式开关：true=允许思维链（更准更慢），false=关闭思维链降延迟。
+  # 关闭时按 base_url 选参数：DeepSeek → {"thinking":{"type":"disabled"}}；Qwen → {"enable_thinking":false}。
+  enable_reasoning: true
+  # 思考强度（仅 enable_reasoning=true 时生效）：low/medium/high/max；空=模型默认。走 extra_body={"reasoning_effort":"..."}。
+  reasoning_effort: ""
 
 cleaner:
   api_key: ""

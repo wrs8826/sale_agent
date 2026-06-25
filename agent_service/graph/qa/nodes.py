@@ -34,7 +34,10 @@ def _history_to_messages(history: List[Dict]) -> List:
         elif role == "user":
             out.append(HumanMessage(content=content))
         elif role == "tool":
-            # 历史里持久化的工具调用结果，以系统提示形式回放（与当轮工具结果注入口径一致，跨厂商稳）
+            # 历史里持久化的工具调用结果，以系统提示形式回放（与当轮工具结果注入口径一致，跨厂商稳）。
+            # 【勿改成回放真 tool_calls】DeepSeek 思考模式要求"有工具调用的轮次必须把
+            # reasoning_content 一并回传"，而我们不持久化 reasoning_content。扁平成 system 文本后，
+            # API 看不到悬空的 assistant.tool_calls，也就不触发该回传约束——这是刻意的规避。
             name = m.get("name") or "工具"
             out.append(SystemMessage(content=f"[历史工具调用 {name} 的返回]\n{content}"))
         else:
@@ -68,12 +71,34 @@ def _format_context(hits: List[Dict]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-def _build_llm(chat_cfg: Dict[str, str]) -> ChatOpenAI:
+def llm_tuning_kwargs(chat_cfg: Dict) -> Dict:
+    """推理模式开关 + 思考强度 → ChatOpenAI 调参 kwargs（extra_body + temperature）。
+
+    - enable_reasoning 非 False（默认开启 = 思考模式）：
+        · 配了 reasoning_effort（"low"/"medium"/"high"/"max"）→ extra_body={"reasoning_effort": ...}
+          控制思考强度（OpenAI 格式，DeepSeek 支持）；没配则返回 {}，用模型默认强度。
+        · 思考模式下 temperature/top_p/presence_penalty/frequency_penalty 均不生效
+          （DeepSeek 文档：设置不报错但被忽略），故不设 temperature。零回归、兼容所有厂商。
+    - 显式关闭（非思考模式）→ 按 base_url 选关推理参数，并设 temperature=0 求确定性；
+      此时 reasoning_effort 无意义，不发送：
+        DeepSeek        → extra_body={"thinking": {"type": "disabled"}}（官方格式）
+        DashScope/Qwen  → extra_body={"enable_thinking": False}
+    """
+    if chat_cfg.get("enable_reasoning") is not False:
+        effort = (chat_cfg.get("reasoning_effort") or "").strip()
+        return {"extra_body": {"reasoning_effort": effort}} if effort else {}
+    base = (chat_cfg.get("base_url") or "").lower()
+    extra = {"thinking": {"type": "disabled"}} if "deepseek" in base else {"enable_thinking": False}
+    return {"extra_body": extra, "temperature": 0}
+
+
+def _build_llm(chat_cfg: Dict) -> ChatOpenAI:
     return ChatOpenAI(
         model=chat_cfg.get("model_name") or "qwen3-max",
         api_key=chat_cfg["api_key"],
         base_url=chat_cfg.get("base_url") or None,
         streaming=True,
+        **llm_tuning_kwargs(chat_cfg),
     )
 
 

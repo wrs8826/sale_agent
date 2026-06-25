@@ -228,7 +228,7 @@ agent_service/chroma_persist/      # 向量库
 
 ### `agent_eval.py` —— 端到端 Agent 五维
 
-真正驱动 QA 主图（`build_qa_graph` + `graph.stream(stream_mode="custom")`），从事件流采集工具调用与最终回答，评测五维：**检索召回**（Recall@k/MRR/Hit@1）、**置信度**（top-1 检索分 vs `score_threshold`，含域内/域外分离）、**工具执行**（`expected_tool` 是否被调 → 选择准确率 + 报错率，真实工具集见 `REAL_TOOLS`，过滤"提取关键词/检索知识库"伪工具）、**答案关键词命中**（`must_contain` 串匹配，免 LLM 的正确性代理）、**忠实度**（LLM-as-judge，复用 chat 模型判 faithfulness/relevance，**已排除 OOD** 以免无上下文失真）。
+真正驱动 QA 主图（`build_qa_graph` + `graph.stream(stream_mode="custom")`），从事件流采集工具调用与最终回答，评测五维：**检索召回**（Recall@k/MRR/Hit@1）、**置信度**（top-1 检索分 vs `score_threshold`，**按 category 分组**：仅 rag 是"该过阈"锚、ood 是"该低"锚、policy/tool 不在检索索引故单列为信息项；分离度按 rag−ood 算）、**工具执行**（`expected_tool` 是否被调 → 选择准确率 + 报错率，真实工具集见 `REAL_TOOLS`，过滤"提取关键词/检索知识库"伪工具）、**答案关键词命中**（`must_contain` 串匹配，免 LLM 的正确性代理）、**忠实度**（LLM-as-judge，复用 chat 模型判 faithfulness/relevance，**已排除 OOD** 以免无上下文失真）。
 
 - **标注集** `eval/agent_eval_set.json`：每条可含 `category`(rag/tool/policy/ood) / `relevant` / `expected_tool` / `must_contain`。
 - **开关**：`--retrieval-only`（只评检索+置信度，无需 chat Key）、`--no-judge`（跳过忠实度，省 token）、`--limit N`、`--verbose`。缺 chat Key 时自动降级为 retrieval-only。
