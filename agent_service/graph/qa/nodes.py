@@ -217,14 +217,31 @@ def retrieve_node(state: ChatState) -> ChatState:
     return {"hits": hits}
 
 
+def _confidence_score(h: Dict) -> float:
+    """单个命中片段的「绝对」相关性分数，用于置信度门控。
+
+    关键：**不能用 hybrid_score**。hybrid_score 由 BM25/向量两路分数各自在「本次候选池」
+    内 min-max 归一化后加权得到（见 simple_rag._make_normalizer），只要召回了任何候选，
+    排第一的那个就会被归一化成 ≈1——哪怕它和问题其实毫不相关。拿它跟绝对阈值
+    （score_threshold）比较会让弱相关查询也被判「命中」，进而把无关上下文喂给模型造成幻觉。
+
+    改用语义上「绝对」的信号，优先级从高到低：
+    1. rerank_score —— reranker 输出的 0-1 相关性，跨查询可比，最可靠；
+    2. vector_score —— 原始向量相似度 1/(1+distance)，未经候选池归一化，绝对可比；
+    3. hybrid_score —— 仅当前两者都缺（如纯 BM25 命中、无向量分）时的兜底。
+    """
+    if "rerank_score" in h:
+        return h.get("rerank_score", 0.0)
+    if "vector_score" in h:
+        return h.get("vector_score", 0.0)
+    return h.get("hybrid_score", 0.0)
+
+
 def _hits_above_threshold(hits: List[Dict], threshold: float) -> bool:
-    """至少有一个命中片段的分数达到阈值。"""
+    """至少有一个命中片段的「绝对」相关性分数达到阈值。"""
     if not hits:
         return False
-    best = max(
-        h.get("rerank_score", h.get("hybrid_score", 0.0)) for h in hits
-    )
-    return best >= threshold
+    return max(_confidence_score(h) for h in hits) >= threshold
 
 
 def generate_node(state: ChatState) -> ChatState:

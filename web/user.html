@@ -637,7 +637,10 @@
     ::-webkit-scrollbar-thumb { background: #e5e7eb; border-radius: 99px; }
     ::-webkit-scrollbar-thumb:hover { background: #d1d5db; }
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+  <!-- 本地托管（不走外网 CDN）：内网/离线可用，杜绝 CDN 不可达导致整页崩 + 供应链投毒。
+       DOMPurify 用于对 Markdown 渲染结果消毒，防存储型 XSS（详见 renderMd）。 -->
+  <script src="/assets/marked.min.js"></script>
+  <script src="/assets/purify.min.js"></script>
 </head>
 <body>
 
@@ -981,13 +984,66 @@ function esc(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
-marked.use({ gfm: true, breaks: true });
+if (window.marked) marked.use({ gfm: true, breaks: true });
+
+// 纯文本降级：保留换行、转义所有 HTML。marked/DOMPurify 任一缺失或解析异常时使用，
+// 既保证「绝不抛错中断渲染」，又保证「绝不把未消毒 HTML 注入 innerHTML」（fail-closed）。
+function _plainFallback(raw) {
+  return esc(raw).replace(/\n/g, '<br>');
+}
+
+// 复制消息：navigator.clipboard 仅在安全上下文（HTTPS / localhost）可用，
+// 经 http://<局域网IP>:5001 访问时它是 undefined。退到 execCommand('copy') 兜底，
+// 二者都失败时给出提示，避免点了没反应。
+function copyMsg(btn) {
+  const bubble = btn.closest('.msg-row')?.querySelector('.msg-bubble');
+  if (!bubble) return;
+  const textVal = bubble.innerText;
+  const done = () => { btn.textContent = '已复制'; setTimeout(() => { btn.textContent = '复制'; }, 1500); };
+
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(textVal).then(done).catch(() => _copyFallback(textVal, btn, done));
+  } else {
+    _copyFallback(textVal, btn, done);
+  }
+}
+
+function _copyFallback(textVal, btn, done) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = textVal;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (ok) done(); else toast('复制失败，请手动选择文本复制', 'warning');
+  } catch {
+    toast('复制失败，请手动选择文本复制', 'warning');
+  }
+}
+
 function renderMd(raw) {
   if (!raw) return '';
-  // 后处理替换：不依赖 renderer API（marked v9 的 table renderer 签名已改为 token 对象，旧写法失效）
-  return marked.parse(raw)
-    .replace(/<table>/g, '<div class="table-wrap"><table>')
-    .replace(/<\/table>/g, '</table></div>');
+  // marked 加载失败（离线 / CDN 改本地后文件缺失）→ 纯文本降级，不让聊天界面整体崩。
+  if (typeof marked === 'undefined' || !marked.parse) return _plainFallback(raw);
+
+  let html;
+  try {
+    // 后处理替换：不依赖 renderer API（marked v9 的 table renderer 签名已改为 token 对象，旧写法失效）
+    html = marked.parse(raw)
+      .replace(/<table>/g, '<div class="table-wrap"><table>')
+      .replace(/<\/table>/g, '</table></div>');
+  } catch {
+    return _plainFallback(raw);
+  }
+
+  // XSS 消毒（关键）：renderMd 的输入覆盖用户输入 / LLM 回答 / 工具结果（含知识库文档原文），
+  // 全部经 innerHTML 注入。marked 默认放行内联 HTML，不消毒会让 <script>/<img onerror> 执行
+  // → 存储型 XSS。DOMPurify 缺失时退到纯文本兜底（宁可丢格式也不注入未消毒 HTML）。
+  if (window.DOMPurify) return DOMPurify.sanitize(html);
+  return _plainFallback(raw);
 }
 
 /* ── 页面切换 ──────────────────────────────────────────────────── */
@@ -1522,7 +1578,7 @@ function appendMsg(role, html, { fromHistory, time } = {}) {
       <div class="msg-bubble">${html}</div>
       <div class="msg-meta">
         <span class="msg-time">${time || fmtTime()}</span>
-        ${role !== 'user' ? '<button class="copy-btn" onclick="navigator.clipboard.writeText(this.closest(\'.msg-row\').querySelector(\'.msg-bubble\').innerText);this.textContent=\'已复制\'">复制</button>' : ''}
+        ${role !== 'user' ? '<button class="copy-btn" onclick="copyMsg(this)">复制</button>' : ''}
       </div>
     </div>`;
   chatBody.appendChild(row);
@@ -1939,6 +1995,9 @@ async function doSend() {
           if (tabId === activeTabId) document.getElementById('chat-title').textContent = t.title;
           renderTabBar();
           loadConvList();
+        } else if (ev.type === 'warning') {
+          // 非致命提示（如 react 降级 single、需修改配置）：toast 提示，不打断回答气泡
+          if (tabId === activeTabId && ev.message) toast(ev.message, 'warning');
         } else if (ev.type === 'error') {
           if (!started) {
             t.messages.push({ id: assistantId, role: 'assistant', content: `❌ ${ev.message}`, time: sendTime });

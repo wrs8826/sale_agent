@@ -462,6 +462,7 @@ def generate_word_document(title: str, sections: list, filename: str = "") -> st
 
         doc.add_heading(str(title).strip(), level=0)
 
+        rendered_sections = 0   # 实际写入了标题或正文的章节数；为 0 说明 sections 结构全无效
         for sec in sections:
             if not isinstance(sec, dict):
                 continue
@@ -477,6 +478,17 @@ def generate_word_document(title: str, sections: list, filename: str = "") -> st
                 doc.add_heading(heading, level=level)
             if body:
                 _render_body(doc, body)
+            if heading or body:
+                rendered_sections += 1
+
+        # 没有任何有效章节（如 LLM 误把 sections 传成 list[str]，dict 校验全跳过）：
+        # 不能落一个只有标题的空文档却报「已生成」，否则用户下载到空文件。明确报错并提示正确结构。
+        if rendered_sections == 0:
+            return (
+                "生成失败：sections 中没有有效章节。每个元素必须是包含 "
+                '"heading" 和/或 "body" 的 dict，例如 '
+                '[{"heading": "一、概述", "body": "正文…", "level": 1}]。'
+            )
 
         # 文件名：清洗非法字符 + 短 uuid 防覆盖
         base = (filename or title).strip()

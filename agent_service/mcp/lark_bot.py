@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -26,6 +27,9 @@ _CONFIG_PATH = Path(__file__).resolve().parent / "lark_mcp.json"
 STATE_IDLE    = "idle"
 STATE_RUNNING = "running"
 STATE_ERROR   = "error"
+
+# 飞书事件是 at-least-once：同一 message_id 可能被重推。最多记忆最近这么多条已处理 id 做去重。
+_SEEN_MSG_MAX = 512
 
 
 def _load_cfg() -> Dict[str, Any]:
@@ -41,6 +45,14 @@ class LarkBot:
         self._client: Optional[Any] = None   # lark.Client，用于发消息
         self._started = False
         self._lock = threading.Lock()
+
+        # ── 幂等去重：最近已处理的 message_id（OrderedDict 当有界 LRU 用）────────
+        self._seen_lock = threading.Lock()
+        self._seen_msgs: "OrderedDict[str, None]" = OrderedDict()
+
+        # ── 会话级单飞：按 open_id+chat_id 串行化同会话消息，消除 append_turn 竞态 ─
+        self._conv_locks_guard = threading.Lock()
+        self._conv_locks: Dict[str, threading.Lock] = {}
 
     # ── 外部接口 ──────────────────────────────────────────────────────────────
 
@@ -127,9 +139,46 @@ class LarkBot:
 
     # ── 消息处理 ──────────────────────────────────────────────────────────────
 
+    def _seen_before(self, message_id: str) -> bool:
+        """标记并判断 message_id 是否已处理过（幂等去重）。
+
+        返回 True 表示这是一次重复推送，应直接丢弃；空 id 一律放行（无法去重）。
+        采用「检查即标记」原子操作，避免两次重推并发都判为首次。
+        """
+        if not message_id:
+            return False
+        with self._seen_lock:
+            if message_id in self._seen_msgs:
+                self._seen_msgs.move_to_end(message_id)
+                return True
+            self._seen_msgs[message_id] = None
+            if len(self._seen_msgs) > _SEEN_MSG_MAX:
+                self._seen_msgs.popitem(last=False)   # 淘汰最旧
+            return False
+
+    def _conv_lock(self, key: str) -> threading.Lock:
+        """取（必要时创建）某会话维度的锁，用于串行化同会话消息处理。"""
+        with self._conv_locks_guard:
+            lk = self._conv_locks.get(key)
+            if lk is None:
+                lk = threading.Lock()
+                self._conv_locks[key] = lk
+            return lk
+
     def _on_p2p_message(self, data: Any) -> None:
-        """收到 P2P 消息时由 SDK 回调，立即开新线程处理，避免阻塞 SDK 心跳。"""
+        """收到 P2P 消息时由 SDK 回调，立即开新线程处理，避免阻塞 SDK 心跳。
+
+        在派发前先做 message_id 幂等去重：飞书 at-least-once 会重推同一事件，
+        重复的直接丢弃，防止重复回答 + 历史重复写入。
+        """
         print(f"[lark_bot] 收到消息回调: {data}")
+        try:
+            message_id = data.event.message.message_id or ""
+        except Exception:
+            message_id = ""
+        if self._seen_before(message_id):
+            print(f"[lark_bot] 重复消息，已忽略: message_id={message_id}")
+            return
         threading.Thread(
             target=self._reply_async,
             args=(data,),
@@ -155,36 +204,40 @@ class LarkBot:
             if not content:
                 return
 
-            # ── 特殊指令 ──────────────────────────────────────────────────────
-            cmd = content.strip().lower()
-            if cmd == "clear":
-                reply_text = self._save_and_clear(open_id=open_id, chat_id=chat_id)
-                self._send_reply(message_id, reply_text)
-                return
-            if cmd == "auth":
-                reply_text = self._send_auth_link(open_id=open_id, message_id=message_id)
-                # _send_auth_link 内部已发送消息卡片，此处只补一条文本回复
-                if reply_text:
+            # ── 会话级单飞：同一 open_id+chat_id 串行处理 ─────────────────────
+            # 覆盖「读历史 → 生成 → append_turn」全过程，消除 append_turn 的
+            # read-modify-write 竞态（并发会互相覆盖、丢一轮对话）。
+            with self._conv_lock(f"{open_id}::{chat_id}"):
+                # ── 特殊指令 ──────────────────────────────────────────────────
+                cmd = content.strip().lower()
+                if cmd == "clear":
+                    reply_text = self._save_and_clear(open_id=open_id, chat_id=chat_id)
                     self._send_reply(message_id, reply_text)
-                return
-            if cmd == "deauth":
-                reply_text = self._revoke_auth(open_id=open_id)
+                    return
+                if cmd == "auth":
+                    reply_text = self._send_auth_link(open_id=open_id, message_id=message_id)
+                    # _send_auth_link 内部已发送消息卡片，此处只补一条文本回复
+                    if reply_text:
+                        self._send_reply(message_id, reply_text)
+                    return
+                if cmd == "deauth":
+                    reply_text = self._revoke_auth(open_id=open_id)
+                    self._send_reply(message_id, reply_text)
+                    return
+
+                reply_text = self._query(content, open_id=open_id, chat_id=chat_id)
+                if not reply_text:
+                    return
+
+                # 持久化本轮对话（写失败不影响回复）
+                if open_id or chat_id:
+                    try:
+                        from agent_service.mcp.lark_history import append_turn
+                        append_turn(open_id, chat_id, content, reply_text)
+                    except Exception as exc:
+                        print(f"[lark_bot] 历史写入失败（不影响回复）: {exc}")
+
                 self._send_reply(message_id, reply_text)
-                return
-
-            reply_text = self._query(content, open_id=open_id, chat_id=chat_id)
-            if not reply_text:
-                return
-
-            # 持久化本轮对话（写失败不影响回复）
-            if open_id or chat_id:
-                try:
-                    from agent_service.mcp.lark_history import append_turn
-                    append_turn(open_id, chat_id, content, reply_text)
-                except Exception as exc:
-                    print(f"[lark_bot] 历史写入失败（不影响回复）: {exc}")
-
-            self._send_reply(message_id, reply_text)
 
         except Exception as exc:
             print(f"[lark_bot] 消息处理失败: {exc}")

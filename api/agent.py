@@ -212,10 +212,22 @@ def agent_chat():
     use_rag = rag is not None
 
     agent_mode = services.get_agent_mode()    # feature flag：react 多步循环 / single 单趟
+    # 降级原因（非空时在生成开始向前端发 warning，提示用户修改配置）。
+    degraded_reason = None
     try:
         graph = build_qa_graph(agent_mode)
     except Exception as e:
-        return jsonify({"error": f"QA 图初始化失败: {e}"}), 500
+        if agent_mode == "react":
+            # react 初始化失败不直接挂掉对话：降级为 single 保证可用，并提示用户检查配置。
+            # single 仅单趟工具，多步能力受限——靠 warning 事件让用户知道要修好后切回 react。
+            try:
+                graph = build_qa_graph("single")
+                degraded_reason = str(e)
+                agent_mode = "single"
+            except Exception as e2:
+                return jsonify({"error": f"QA 图初始化失败: {e2}"}), 500
+        else:
+            return jsonify({"error": f"QA 图初始化失败: {e}"}), 500
 
     skill = detect_skill(message)
     state = {
@@ -247,6 +259,19 @@ def agent_chat():
 
     def generate():
         full_text = ""
+
+        # ── 降级提示：react 初始化失败已回退 single，提醒用户修改配置后重试 ──────
+        if degraded_reason:
+            yield (
+                "data: " + json.dumps({
+                    "type": "warning",
+                    "message": (
+                        "多步模式（react）初始化失败，已临时降级为单步模式（single），"
+                        "多步工具能力受限。请检查 config.yaml 的 agent_mode 配置与相关依赖，"
+                        f"修复后重新启用 react。原因：{degraded_reason}"
+                    ),
+                }, ensure_ascii=False) + "\n\n"
+            )
 
         # ── 自动压缩：折叠中间段、保留首尾原文 ────────────────────────────
         # 主触发：逐字（未折叠）轮数超过 头+尾+余量（中间已积出可折叠段）；

@@ -424,3 +424,48 @@ params={"department_id": root, "department_id_type": "open_department_id", ...}
 **触发点**：`builtin_mcp_server.py` 从 `builtin_tools` 导入同一函数转发，**实现**自动同享此修复；新增带 references 的 skill 无需改工具。
 
 **⚠️ docstring 不会自动同步（文档漂移坑）**：MCP 转发层（`builtin_mcp_server.py`）里每个 `@mcp_server.tool()` 包装函数**重新声明了自己的 docstring**——这才是飞书侧 LLM 读到的工具 schema，**不是** `builtin_tools` 里的那份。所以改了 `builtin_tools` 工具的 docstring/参数说明后，必须手工把 `builtin_mcp_server.py` 对应包装函数的 docstring 一并改掉，否则飞书侧模型读到旧提示（本坑的 `load_policy_file` 就曾因此残留「已通过 SKILL.md 确定目标文件」的旧措辞，诱导飞书侧重新去读 SKILL.md）。根治办法是让转发层复用 LangChain 工具的 `.description`/参数 schema、消除重复，未做之前以「改一处记得改两处」为准。
+
+## 40. 置信度门控误用 hybrid_score（归一化分）→ 弱相关查询也被判「命中」(已修)
+
+**症状（修复前）**：明明知识库里没有相关内容，问一个边缘/无关问题，agent 仍把检索到的无关片段当作上下文喂给模型（`has_hits=True`），生成「一本正经的幻觉」。OOD（库外）查询本该走「无上下文」分支却没走。
+
+**根因**：`graph/qa/nodes.py: _hits_above_threshold` 早期用 `h.get("rerank_score", h.get("hybrid_score"))` 跟 `score_threshold`（默认 0.3）比较。但 `hybrid_score` 是 BM25/向量两路分数各自在**本次候选池**内 min-max 归一化（`simple_rag._make_normalizer`）后加权得到的——**只要召回了任何候选，排第一的那个就被归一化成 ≈1**，与「绝对相关性」脱钩。拿它跟绝对阈值比，几乎永远为真。
+
+**修复**：新增 `_confidence_score(h)`，按「绝对可比」优先级取分：① `rerank_score`（reranker 的 0-1 相关性，跨查询可比，最可靠）→ ② `vector_score`（原始向量相似度 `1/(1+distance)`，未经候选池归一化）→ ③ `hybrid_score`（仅前两者都缺时兜底）。三处门控（`generate_node`/`plan_node`/`agent_react_node`）共用。
+
+**⚠️ 阈值需按是否启用 reranker 重新标定**：`score_threshold`（config `chat.rag_score_threshold`）以前是跟「恒≈1 的归一化分」比，故 0.3 形同虚设。改后：
+- **启用 reranker**：门控吃 `rerank_score`（干净的 0-1），0.3 左右合理；
+- **未启用 reranker**：门控吃 `vector_score`。注意 Chroma 默认 L2 距离下 `1/(1+distance)` 有**下限**（归一化向量约 0.33），0.3 仍会放过几乎所有候选——**没接 reranker 时应把 `rag_score_threshold` 调高**（建议先按真实语料用 `eval/agent_eval.py` 的置信度维度标定，rag 类该过阈、ood 类该被挡）。
+
+**触发点**：`vector_score` 键在 `HybridRetriever.search` 的每个候选上**恒存在**（BM25-only 命中也会被置 `vector_score=0.0`），故纯关键词命中、语义零重叠的片段会被门控挡掉——这是预期的保守行为（避免拿无语义关联的关键词巧合当高置信上下文）。
+
+## 41. 飞书机器人：重复回答 + 并发丢历史（已修）
+
+**症状（修复前）**：① 同一问题偶发被机器人回答两遍；② 用户连发两条消息时，其中一轮对话在历史里「消失」（下次重载历史看不到）。
+
+**双重根因**：
+1. **无幂等去重**：飞书事件是 **at-least-once**，网络抖动/ACK 丢失时会重推同一 `im.message.receive`（同一 `message_id`）。`lark_bot._on_p2p_message` 拿到回调就开线程处理，没按 `message_id` 去重 → 重推 = 重复回答 + `append_turn` 重复写。
+2. **历史写入竞态**：`lark_history.append_turn` 是「读文件 → append → 整体覆写」。写本身是 `tmp+replace` 原子的，但**读到写之间无锁**；而 `_on_p2p_message` 每条消息开一个新线程，同一用户连发两条 → 两线程并发 `load→append→save`，**后写覆盖先写，丢一轮**。网页端已有「会话级单飞锁」，飞书路径当时没享受到。
+
+**修复**（`agent_service/mcp/lark_bot.py`，单进程，用进程内锁即可，无需 filelock）：
+- **幂等去重**：`LarkBot` 持一个有界 LRU（`OrderedDict`，上限 `_SEEN_MSG_MAX=512`）记最近处理过的 `message_id`；`_seen_before()` 做「检查即标记」原子操作，重复直接丢弃。在**派发线程前**（`_on_p2p_message` 内）就拦掉，连线程都不开。空 `message_id` 放行（无法去重）。
+- **会话级单飞**：按 `f"{open_id}::{chat_id}"` 维度持锁（`_conv_lock()` 惰性建锁），在 `_reply_async` 里用 `with self._conv_lock(key):` **包住「读历史 → 生成 → append_turn → 回复」全过程**（含 clear/auth/deauth 指令），同会话消息串行执行，消除竞态。不同会话仍并行。
+
+**注意/权衡**：
+- 锁是**阻塞串行**（不像网页端单飞那样回 409 拒绝），因为飞书用户连发的两条都应被回答、只是排队，不能丢。
+- `_conv_locks` / `_seen_msgs` 只在内存，**进程重启后清空**——重启瞬间正好重推的极少数消息可能漏去重（可接受）；`_conv_locks` 按会话数增长、不回收（机器人场景有界，量大可加 LRU 淘汰）。
+- 改 `_reply_async` 时**别把锁去掉或缩小范围**：锁必须横跨 `_query`（内部 load_history）到 `append_turn`，否则竞态复活。
+
+## 42. 用户端 Markdown 渲染 XSS + 依赖走外网 CDN（已修）
+
+**症状（修复前）**：① 知识库里一份含 `<img src=x onerror=...>` 的文档，或诱导模型回显一段 HTML，下次任何人打开该会话即触发——**存储型 XSS**；② 内网/离线部署时 marked 走 `cdn.jsdelivr.net` 拉不到 → `marked` 未定义 → 每次 `renderMd` 抛错 → **聊天界面整体不可用**；③ CDN 无 SRI，被投毒即前端 RCE。
+
+**根因**：`web/user.html` 的 `renderMd` 直接 `marked.parse(raw)` 后 `innerHTML` 注入，marked 默认放行内联 HTML、**不消毒**；而 `renderMd` 的输入覆盖**所有不可信来源**——用户输入、LLM 回答、历史里的 `role=tool` 工具结果（含知识库文档原文）。marked 又只从外网 CDN 加载、无本地兜底、无 SRI。
+
+**修复**：
+- **本地托管**：marked + DOMPurify 下载到 `web/assets/{marked.min.js,purify.min.js}`，`<script src="/assets/...">` 引用（`/assets/<filename>` 路由公开服务，与 `common.css` 同源）。去掉外网 CDN 依赖与供应链风险。
+- **消毒 + fail-closed**：`renderMd` 改为 `DOMPurify.sanitize(marked.parse(raw))`；marked/DOMPurify 缺失或 `marked.parse` 抛异常时一律退 `_plainFallback`（`esc()` + `<br>`，**绝不注入未消毒 HTML**）；`marked.use(...)` 加 `if (window.marked)` 守卫，防加载失败拖垮整段内联脚本。
+
+**触发点/约定**：前端渲染消息**必须经 `renderMd`**，别再图省事直接把 LLM/工具/用户文本拼进 `innerHTML`。错误消息、标题、工具名、文件名等非 Markdown 文本继续用 `esc()`。新增任何「把外部文本注入 DOM」的位置照此办。
+
+**附带**：复制按钮原先裸调 `navigator.clipboard`，LAN HTTP（非安全上下文）下它是 `undefined`、点了没反应。已抽成 `copyMsg()`：安全上下文走 Clipboard API，否则退 `document.execCommand('copy')`，再失败 toast 提示。

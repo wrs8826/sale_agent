@@ -4,7 +4,7 @@
 
 ## 功能概览
 
-- **RAG 问答**：混合检索（BM25 + 向量）+ 可选重排序，支持自定义知识库；BM25 用 jieba 中文分词、两路分数 min-max 归一化融合、嵌入结果持久缓存（仅对新增/变更分块重算）；命中分数低于 `chat.rag_score_threshold`（默认 0.3）时回退会话上下文作答
+- **RAG 问答**：混合检索（BM25 + 向量）+ 可选重排序，支持自定义知识库；BM25 用 jieba 中文分词、两路分数 min-max 归一化融合、嵌入结果持久缓存（仅对新增/变更分块重算）；置信度门控用**绝对相关性分**（启用重排时取 reranker 分，未启用时退向量原始相似度——不拿候选池内归一化后的 hybrid 分误判），低于 `chat.rag_score_threshold`（默认 0.3）时回退会话上下文作答
 - **流式输出**：Server-Sent Events（SSE）逐 token 推送（`tool_start / tool_end / plan_* / token / download / done / auto_compacted / circuit_break / conversation_saved` 等事件）
 - **多步工具循环（ReAct）**：`agent_mode` feature flag 灰度切换——`single`（单趟一次工具）/ `react`（`create_react_agent` 多步 思考→调工具→观察，网页端最多 15 轮）；网页端与飞书降级共用
 - **先列方案再执行**：`enable_planning` 开关（仅 react 生效）——执行前先产出一份执行方案（任务拆分），以独立「📋 执行方案」卡片流式展示，并作为执行指令注入循环；仅网页端
@@ -17,7 +17,8 @@
 - **会话单飞与中断**：同一会话同一时刻只允许一个回答在生成——生成期间禁止再发，须先「中断」（前端停止键 abort，本轮整体丢弃不落盘）。服务端以**会话级锁**（进程内 `threading` + 跨进程 `filelock`）强制单飞，跨设备/管理端并发发送回 `409`；同一把锁也保护压缩/改名/删除，杜绝并发读改写丢更新
 - **技能系统**：通过 `skills/` 目录挂载专项技能，关键词路由自动匹配；管理端可上传政策材料 →（开发态 `policy_skill_maker` 方法论）自动生成 skill 草稿 → 人工审核发布
 - **管理后台**：用户管理、知识库管理、政策 Skill 更新、参数配置、对话统计（React + TypeScript）
-- **飞书机器人**：WebSocket 长连接，无需公网域名；两个 MCP server（官方飞书工具 + 内置工具）
+- **飞书机器人**：WebSocket 长连接，无需公网域名；两个 MCP server（官方飞书工具 + 内置工具）；消息按 `message_id` 幂等去重、按会话单飞串行处理（防 at-least-once 重推导致的重复回答与历史并发丢更新）
+- **前端安全**：Markdown 渲染结果经 DOMPurify 消毒（防存储型 XSS——回答/用户输入/工具结果均注入 DOM）；marked / DOMPurify **本地托管**（不依赖外网 CDN，内网/离线可用、无供应链投毒风险），库缺失或解析异常时优雅降级为纯文本
 - **API Key 加密**：Fernet 对称加密存储，`enc:` 前缀标识密文，前端只看到掩码
 - **集中式日志**：统一 `logging` 输出（时间/级别/模块），级别由 `LOG_LEVEL` 环境变量或 `config.yaml` 的 `log_level` 控制（默认 INFO），DEBUG 时放开三方库日志便于排查
 
@@ -248,7 +249,7 @@ python eval/retrieval_eval.py --top-k 3 --report eval/report.json
 
 - **后端**：Flask、LangGraph、LangChain、ChromaDB、rank-bm25、jieba（中文分词）、sentence-transformers
 - **文档解析**：PyMuPDF + pdfplumber（PDF 文本/表格）、unstructured + python-docx（Word 读/写）、charset-normalizer（编码识别）
-- **前端**：vanilla JS（用户端）、React + TypeScript + Tailwind CSS + Vite（管理端）
+- **前端**：vanilla JS（用户端）、React + TypeScript + Tailwind CSS + Vite（管理端）；Markdown 用 marked + DOMPurify（本地托管、渲染前消毒）
 - **LLM**：兼容 OpenAI 接口（默认阿里云百炼 Dashscope）
 - **飞书集成**：lark-oapi SDK WebSocket 长连接
 
