@@ -1,9 +1,10 @@
 """会话持久化蓝图 + 两级历史压缩（支持按用户隔离）。
 
-存储结构：
-    agent_service/conversations/<user_id>/<uuid>.json
+存储后端：MySQL `conversations` 表（元数据列 + JSON body 列）。
+    id / user_id / title / has_summary / compact_at / message_count / created_at / updated_at
+    为便于列表查询与排序的去规范化元数据列；body 列存整个会话 JSON（消息体为文档形状，不拆表）。
 
-每个会话 JSON 结构：
+每个会话 JSON（= body 列内容，亦为各业务函数读写的 conv dict）结构：
     {
         "id":         "<uuid4 hex>",
         "user_id":    <int>,           ← 归属用户（MySQL users.id）
@@ -17,19 +18,25 @@
     }
 
 提供路由：
-    GET    /conversations                       列表（普通用户只看自己的，admin 看全部）
+    GET    /conversations                       列表（普通用户只看自己的，admin 看全部）—— 仅查元数据列，不读 body
     POST   /conversations                       新建空会话（绑定当前 session user_id）
     GET    /conversations/<id>                  取完整会话（校验归属）
     PATCH  /conversations/<id>                  重命名（校验归属）
     DELETE /conversations/<id>                  删除（校验归属）
     POST   /conversations/<id>/compact          手动触发压缩（校验归属）
 
-向前兼容：CONVERSATIONS_DIR 根目录下的老 *.json 文件（无 user_id）
-仅 admin 可见，普通用户看不到。
+迁移与兼容：
+    · 启动时 ensure_table() 建表并把历史 `agent_service/conversations/**/<uuid>.json`
+      幂等导入库（migrate_files_to_db）；旧文件保留在磁盘作为只读备份，不删除。
+    · 读路径（load/find_conversation）在库内 miss 时回退读旧文件（只读），覆盖尚未迁移的会话；
+      写路径（save_conversation）只写库（库为唯一事实源）。
+    · CONVERSATIONS_DIR 仍用于：会话级 filelock 锁文件 + 旧 JSON 只读备份。
+    · 无 user_id 的根目录老格式文件无法判定归属，不入库、不进列表，但可经 find_conversation 直读。
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import uuid
@@ -38,11 +45,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import pymysql
+import pymysql.cursors
 from flask import Blueprint, current_app, jsonify, request, session
 
 from agent_service import CONVERSATIONS_DIR
 from agent_service.graph import build_cleaning_graph
+from agent_service.logging_config import get_logger
 from . import conv_stats
+
+log = get_logger(__name__)
 
 # 跨进程文件锁（app_user / app_admin 是两个进程，会同写同一会话文件）。
 # 缺失时降级为「仅进程内 threading 锁」并告警——功能可用，但跨进程不互斥。
@@ -109,8 +121,230 @@ def _user_dir(user_id: int) -> Path:
 
 
 def _path(cid: str, user_id: int) -> Path:
-    """返回会话文件的绝对路径。"""
+    """返回会话文件的绝对路径（旧格式只读备份 / 锁文件定位用）。"""
     return _user_dir(user_id) / f"{cid}.json"
+
+
+# ── MySQL 存储后端 ──────────────────────────────────────────────────────────
+# 连接参数与 auth.py / conv_stats.py 保持一致（优先环境变量，兜底硬编码）。
+_DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
+_DB_PORT = int(os.getenv("DB_PORT", "3306"))
+_DB_USER = os.getenv("DB_USER", "root")
+_DB_PASS = os.getenv("DB_PASS", "abc123")
+_DB_NAME = os.getenv("DB_NAME", "sales_agent")
+
+
+def _get_conn():
+    return pymysql.connect(
+        host=_DB_HOST, port=_DB_PORT, user=_DB_USER, password=_DB_PASS,
+        database=_DB_NAME, charset="utf8mb4",
+        cursorclass=pymysql.cursors.DictCursor, autocommit=True,
+    )
+
+
+# created_at / updated_at 存为 ISO-8601 字符串（与 _now() 一致）：固定格式下
+# 字典序 == 时间序，故 ORDER BY updated_at 即按时间排序，与旧文件实现完全一致，
+# 且免去时区/格式转换的坑。body 存整个会话 JSON。
+_CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS conversations (
+    id            VARCHAR(64)  NOT NULL PRIMARY KEY,
+    user_id       INT          NOT NULL,
+    title         VARCHAR(255) NOT NULL DEFAULT '',
+    has_summary   TINYINT(1)   NOT NULL DEFAULT 0,
+    compact_at    INT          NOT NULL DEFAULT 0,
+    message_count INT          NOT NULL DEFAULT 0,
+    created_at    VARCHAR(40)  NOT NULL DEFAULT '',
+    updated_at    VARCHAR(40)  NOT NULL DEFAULT '',
+    body          LONGTEXT     NOT NULL,
+    KEY idx_user_updated (user_id, updated_at),
+    KEY idx_updated (updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+
+def ensure_table() -> None:
+    """建表（幂等）+ 首次启动把历史 JSON 文件导入库。app 启动时调用一次。"""
+    try:
+        conn = _get_conn()
+        with conn.cursor() as cur:
+            cur.execute(_CREATE_SQL)
+        conn.close()
+        log.info("conversations 表已就绪")
+    except Exception as exc:
+        log.error("conversations 建表失败（会话功能将不可用）: %s", exc)
+        return
+    try:
+        migrated = migrate_files_to_db()
+        if migrated:
+            log.info("已迁移 %d 个历史会话文件入库", migrated)
+    except Exception as exc:
+        log.error("历史会话文件迁移失败（不影响启动）: %s", exc)
+
+
+def _db_upsert(conv: Dict) -> None:
+    """把整个 conv dict 写入库（INSERT … ON DUPLICATE KEY UPDATE）。
+    created_at / user_id 仅在首次插入时写入，更新时保持不变。"""
+    msgs = conv.get("messages") or []
+    body = json.dumps(conv, ensure_ascii=False)
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO conversations
+                    (id, user_id, title, has_summary, compact_at, message_count,
+                     created_at, updated_at, body)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    title=VALUES(title), has_summary=VALUES(has_summary),
+                    compact_at=VALUES(compact_at), message_count=VALUES(message_count),
+                    updated_at=VALUES(updated_at), body=VALUES(body)
+                """,
+                (
+                    str(conv["id"]), int(conv["user_id"]),
+                    (conv.get("title") or _DEFAULT_TITLE)[:255],
+                    1 if (conv.get("summary") or "").strip() else 0,
+                    int(conv.get("compact_at", 0) or 0),
+                    len(msgs),
+                    conv.get("created_at") or "",
+                    conv.get("updated_at") or "",
+                    body,
+                ),
+            )
+    finally:
+        conn.close()
+
+
+def _db_delete(safe_cid: str, user_id: int) -> None:
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM conversations WHERE id=%s AND user_id=%s",
+                (safe_cid, int(user_id)),
+            )
+    finally:
+        conn.close()
+
+
+def _list_summaries(user_id: int, is_admin: bool) -> List[Dict]:
+    """仅查元数据列拼出列表（不读 body），返回与 _summary() 同形的 dict 列表。"""
+    sql = (
+        "SELECT id, user_id, title, has_summary, compact_at, message_count, "
+        "created_at, updated_at FROM conversations "
+    )
+    params: tuple = ()
+    if not is_admin:
+        sql += "WHERE user_id=%s "
+        params = (int(user_id),)
+    sql += "ORDER BY updated_at DESC"
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return [{
+        "id": r["id"],
+        "user_id": r["user_id"],
+        "title": r["title"] or _DEFAULT_TITLE,
+        "created_at": r["created_at"],
+        "updated_at": r["updated_at"],
+        "message_count": int(r["message_count"] or 0),
+        "has_summary": bool(r["has_summary"]),
+        "compact_at": int(r["compact_at"] or 0),
+    } for r in rows]
+
+
+# ── 旧文件只读回退 + 一次性迁移 ─────────────────────────────────────────────
+def _file_load(safe_cid: str, user_id: int) -> Optional[Dict]:
+    fp = _path(safe_cid, user_id)
+    if not fp.is_file():
+        return None
+    try:
+        return json.loads(fp.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _file_find(safe_cid: str) -> Optional[Dict]:
+    if not CONVERSATIONS_DIR.exists():
+        return None
+    for user_dir in CONVERSATIONS_DIR.iterdir():
+        if not user_dir.is_dir():
+            continue
+        fp = user_dir / f"{safe_cid}.json"
+        if fp.is_file():
+            try:
+                return json.loads(fp.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+    fp = CONVERSATIONS_DIR / f"{safe_cid}.json"   # 根目录老格式
+    if fp.is_file():
+        try:
+            return json.loads(fp.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return None
+
+
+def _file_remove(safe_cid: str, user_id: int) -> None:
+    """删除旧文件备份（防只读回退把已删会话"复活"）；失败静默。"""
+    try:
+        fp = _path(safe_cid, user_id)
+        if fp.is_file():
+            fp.unlink()
+    except Exception:
+        pass
+
+
+def migrate_files_to_db() -> int:
+    """把 CONVERSATIONS_DIR 下所有历史 *.json 幂等导入库（已在库的 id 跳过）。
+
+    文件保留在磁盘作为只读备份，不删除。无 user_id 的根目录老格式文件用目录名兜底，
+    无法判定归属则跳过（仍可经 find_conversation 直读，但不入库、不进列表）。返回新导入条数。
+    """
+    if not CONVERSATIONS_DIR.exists():
+        return 0
+    try:
+        conn = _get_conn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM conversations")
+            existing = {r["id"] for r in cur.fetchall()}
+        conn.close()
+    except Exception as exc:
+        log.error("迁移：读取库内现有会话 id 失败: %s", exc)
+        return 0
+
+    count = 0
+    dirs = [CONVERSATIONS_DIR] + [d for d in CONVERSATIONS_DIR.iterdir() if d.is_dir()]
+    for d in dirs:
+        for fp in d.glob("*.json"):
+            # 文件恒命名为 <id>.json，故先按文件名跳过已迁移项，免去重复读盘
+            if fp.stem in existing:
+                continue
+            try:
+                conv = json.loads(fp.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            cid = conv.get("id") or fp.stem
+            if cid in existing:
+                continue
+            if conv.get("user_id") is None:
+                # 子目录名即 user_id；根目录无 user_id 的老文件无法判定归属 → 跳过
+                if d is not CONVERSATIONS_DIR and d.name.isdigit():
+                    conv["user_id"] = int(d.name)
+                else:
+                    continue
+            conv["id"] = cid
+            try:
+                _db_upsert(conv)
+                existing.add(cid)
+                count += 1
+            except Exception as exc:
+                log.error("迁移会话 %s 失败: %s", cid, exc)
+    return count
 
 
 # ── 会话级互斥锁（单飞 + 防并发丢更新）──────────────────────────────────────
@@ -218,58 +452,50 @@ def conversation_lock(cid: str, user_id: Optional[int], wait: float = 0.0):
 # ── CRUD 基础函数 ─────────────────────────────────────────────────────────────
 
 def load_conversation(cid: str, user_id: int) -> Optional[Dict]:
-    """从指定用户目录加载会话。找不到返回 None。"""
+    """加载指定用户的会话（库优先，库内 miss 回退读旧文件）。找不到返回 None。"""
     safe = _safe_id(cid)
     if not safe:
         return None
-    fp = _path(safe, user_id)
-    if not fp.is_file():
-        return None
     try:
-        return json.loads(fp.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+        conn = _get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT body FROM conversations WHERE id=%s AND user_id=%s",
+                (safe, int(user_id)),
+            )
+            row = cur.fetchone()
+        conn.close()
+        if row:
+            return json.loads(row["body"])
+    except Exception as exc:
+        log.error("load_conversation 查库失败 (%s): %s", safe, exc)
+    return _file_load(safe, user_id)   # 未迁移的旧文件只读回退
 
 
 def find_conversation(cid: str) -> Optional[Dict]:
-    """跨所有用户目录搜索会话（仅供 admin 或内部使用）。
-    先查子目录，再查根目录（老格式兼容）。
-    """
+    """跨所有用户搜索会话（仅供 admin 或内部使用）：库优先，miss 回退旧文件。"""
     safe = _safe_id(cid)
     if not safe:
         return None
-    CONVERSATIONS_DIR.mkdir(parents=True, exist_ok=True)
-    # 先搜各用户子目录
-    for user_dir in CONVERSATIONS_DIR.iterdir():
-        if not user_dir.is_dir():
-            continue
-        fp = user_dir / f"{safe}.json"
-        if fp.is_file():
-            try:
-                return json.loads(fp.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-    # 再搜根目录（向前兼容老格式）
-    fp = CONVERSATIONS_DIR / f"{safe}.json"
-    if fp.is_file():
-        try:
-            return json.loads(fp.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return None
+    try:
+        conn = _get_conn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT body FROM conversations WHERE id=%s", (safe,))
+            row = cur.fetchone()
+        conn.close()
+        if row:
+            return json.loads(row["body"])
+    except Exception as exc:
+        log.error("find_conversation 查库失败 (%s): %s", safe, exc)
+    return _file_find(safe)
 
 
 def save_conversation(conv: Dict) -> None:
-    """保存到 user_id 子目录，原子写（tmp → replace）。"""
+    """写入库（INSERT … ON DUPLICATE KEY UPDATE，库为唯一事实源）。"""
     user_id = conv.get("user_id")
     if user_id is None:
         raise ValueError("save_conversation: conv 缺少 user_id 字段")
-    target_dir = _user_dir(int(user_id))
-    target_dir.mkdir(parents=True, exist_ok=True)
-    fp = target_dir / f"{conv['id']}.json"
-    tmp = fp.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(conv, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(fp)
+    _db_upsert(conv)
 
 
 def new_id() -> str:
@@ -606,32 +832,13 @@ def list_conversations():
     if uid is None:
         return jsonify({"error": "未登录"}), 401
 
-    CONVERSATIONS_DIR.mkdir(parents=True, exist_ok=True)
-    out = []
-
-    if _is_admin():
-        # admin：遍历所有用户子目录 + 根目录（老格式）
-        dirs_to_scan: List[Path] = [CONVERSATIONS_DIR]
-        for sub in CONVERSATIONS_DIR.iterdir():
-            if sub.is_dir():
-                dirs_to_scan.append(sub)
-    else:
-        # 普通用户：只扫自己的子目录
-        dirs_to_scan = [_user_dir(uid)]
-
-    for d in dirs_to_scan:
-        if not d.exists():
-            continue
-        for fp in d.glob("*.json"):
-            try:
-                conv = json.loads(fp.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            # 根目录的老格式文件只有 admin 能看到（dirs_to_scan 已控制范围）
-            out.append(_summary(conv))
-
-    out.sort(key=lambda c: c.get("updated_at") or "", reverse=True)
-    return jsonify({"items": out})
+    # 仅查元数据列 + 走 (user_id, updated_at) 索引排序，不读 body：admin 全表、普通用户限本人。
+    try:
+        items = _list_summaries(uid, _is_admin())
+    except Exception as exc:
+        log.error("list_conversations 失败: %s", exc)
+        return jsonify({"error": "读取会话列表失败"}), 500
+    return jsonify({"items": items})
 
 
 @bp.route("/conversations", methods=["POST"])
@@ -722,19 +929,18 @@ def delete_conversation(cid: str):
     if not _check_ownership(conv):
         return jsonify({"error": "无权删除该会话"}), 403
 
-    # 定位并删除文件
+    # 删库行 + 清理旧文件备份
     owner_id = conv.get("user_id")
     if owner_id is not None:
-        fp = _path(safe, int(owner_id))
         try:
-            # 取锁后再删，避免删到一半另有生成在写（写回会复活僵尸文件）
+            # 取锁后再删，避免删到一半另有生成在写（写回会复活僵尸会话）
             with conversation_lock(safe, int(owner_id), wait=MUTATE_LOCK_WAIT):
-                if fp.is_file():
-                    fp.unlink()
+                _db_delete(safe, int(owner_id))
+                _file_remove(safe, int(owner_id))   # 防只读回退把已删会话复活
         except ConversationBusy:
             return jsonify({"error": "该对话正在生成中，请先中断或稍后再删除"}), 409
     else:
-        fp = CONVERSATIONS_DIR / f"{safe}.json"  # 老格式（无 user_id，无法定位锁）
+        fp = CONVERSATIONS_DIR / f"{safe}.json"  # 老格式（无 user_id，不在库，仅磁盘）
         if fp.is_file():
             fp.unlink()
     return jsonify({"ok": True})

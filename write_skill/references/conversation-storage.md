@@ -1,20 +1,46 @@
 # 会话持久化 + 四级压缩（Phase 0 工具持久化 + L1/L2 发送态裁剪 + L3 滚动摘要 + L4 熔断）
 
-## 文件布局（用户隔离）
+## 存储后端（MySQL `conversations` 表）
+
+会话存 MySQL，不再以 JSON 文件为事实源。表为「去规范化元数据列 + JSON body 列」：
+
+```sql
+CREATE TABLE conversations (
+    id            VARCHAR(64)  PRIMARY KEY,   -- uuid_hex
+    user_id       INT          NOT NULL,
+    title         VARCHAR(255) NOT NULL DEFAULT '',
+    has_summary   TINYINT(1)   NOT NULL DEFAULT 0,
+    compact_at    INT          NOT NULL DEFAULT 0,
+    message_count INT          NOT NULL DEFAULT 0,
+    created_at    VARCHAR(40)  NOT NULL DEFAULT '',  -- ISO-8601 字符串，字典序==时间序
+    updated_at    VARCHAR(40)  NOT NULL DEFAULT '',
+    body          LONGTEXT     NOT NULL,             -- 整个会话 JSON（结构见下）
+    KEY idx_user_updated (user_id, updated_at),
+    KEY idx_updated (updated_at)
+);
+```
+
+- **元数据列**仅供 `GET /conversations` 列表查询/排序用（走索引，不读 body）；**body 列**是各业务函数读写的 conv dict 全文。消息体是文档形状，刻意不拆成消息表。
+- `created_at`/`updated_at` 存 ISO-8601 字符串而非 DATETIME：固定格式下字典序==时间序，`ORDER BY updated_at DESC` 即时间排序，与旧文件实现一致，免去时区/格式转换坑。
+- `save_conversation` 走 `INSERT … ON DUPLICATE KEY UPDATE`（`created_at`/`user_id` 仅首次写入，更新不动）。`load_conversation`/`find_conversation` 先查库；`list_conversations` 用 `_list_summaries()` 仅查元数据列。
+- DB 连接参数与 `auth.py`/`conv_stats.py` 一致：env `DB_HOST/DB_PORT/DB_USER/DB_PASS/DB_NAME`，兜底硬编码。
+
+### 迁移与旧文件兼容
 
 ```
-agent_service/conversations/
-├── <user_id>/               ← 每个用户一个子目录（user_id = MySQL users.id）
-│   ├── <uuid_hex>.json
-│   └── <uuid_hex>.json
-├── <user_id>/
-│   └── ...
-└── <uuid_hex>.json          ← 历史遗留文件（无 user_id），仅 admin 可见
+agent_service/conversations/           ← 现仅作：会话级 filelock 锁文件 + 旧 JSON 只读备份
+├── <user_id>/<uuid_hex>.json          ← 旧格式，已被启动迁移导入库；保留作备份不删
+├── <user_id>/<uuid_hex>.json.lock     ← filelock 跨进程锁文件
+└── <uuid_hex>.json                    ← 无 user_id 的根目录老文件：无法判定归属，不入库、不进列表，但可经 find_conversation 直读
 ```
 
-uuid 由后端 `uuid.uuid4().hex` 生成，匹配 `^[A-Za-z0-9_-]{6,64}$`。文件操作前先 `_safe_id()` 校验，防路径注入。
+- **启动迁移**：`create_app` 调 `conversations.ensure_table()` → 建表 + `migrate_files_to_db()` 幂等导入历史文件（按文件名 `<id>.json` 先跳过已迁移项，免重复读盘）。也可手动跑 `python -m scripts.migrate_conversations_to_db [--dry-run]`。
+- **读回退**：库内 miss 时 `load/find_conversation` 回退读旧 JSON 文件（只读），覆盖尚未迁移的会话；写只写库。
+- **删除**：删库行 + `_file_remove()` 清旧文件备份（防只读回退把已删会话"复活"）。
 
-## JSON Schema
+uuid 由后端 `uuid.uuid4().hex` 生成，匹配 `^[A-Za-z0-9_-]{6,64}$`。所有读写前先 `_safe_id()` 校验，防注入；`id` 同时是表主键。
+
+## JSON Schema（body 列内容）
 
 ```json
 {
@@ -90,23 +116,22 @@ elif user_id is not None:  # 已登录但未提供 conversation_id
 
 ## 向前兼容
 
-根目录下无 `user_id` 的老 JSON 文件不会被任何用户的列表扫到（各自只扫自己的子目录），仅 admin 扫全目录时可见。可按需手动迁移到对应子目录并补 `user_id` 字段。
+历史 `<user_id>/<uuid>.json` 文件在启动时由 `migrate_files_to_db()` 幂等导入库（见上「迁移与旧文件兼容」），导入后仍保留在磁盘作只读备份。根目录下无 `user_id` 的老 JSON 文件无法判定归属，**不入库、不进列表**，但仍可经 `find_conversation`（库 miss → 文件回退）直读；如需让其进列表，手动补 `user_id` 后移入对应 `<user_id>/` 子目录再重启迁移即可。
 
-## 原子写
+## 写入（DB upsert）
 
 ```python
-tmp = fp.with_suffix(".json.tmp")
-tmp.write_text(json.dumps(conv, ...), encoding="utf-8")
-tmp.replace(fp)
+INSERT INTO conversations (...) VALUES (...)
+ON DUPLICATE KEY UPDATE title=VALUES(title), ..., body=VALUES(body)
 ```
 
-避免半写损坏。但原子写只防"写出半个文件"，**不防并发丢更新**（两个 load→改→save 互相覆盖）——见下。
+单条 upsert 天然不会"写出半行"，但**不防并发丢更新**（两个 load→改→save 互相覆盖整个 body）——见下。
 
 ## 并发：会话级单飞锁（防丢更新 + 中断丢弃）
 
-`load→改→save` 的读改写在并发下会互相覆盖。**双进程**（`app_user` 5001 / `app_admin` 5002 同写一份会话文件，如 admin 压缩用户会话而用户正在聊）使纯进程内锁不够，故用**进程内 `threading.Lock` + 跨进程 `filelock`** 的每会话锁。
+`load→改→save` 的读改写在并发下会互相覆盖整个 body 行。**双进程**（`app_user` 5001 / `app_admin` 5002 同写一行会话记录，如 admin 压缩用户会话而用户正在聊）使纯进程内锁不够，故用**进程内 `threading.Lock` + 跨进程 `filelock`** 的每会话锁。锁文件仍落在 `CONVERSATIONS_DIR/<user_id>/<cid>.json.lock`（锁与数据存哪无关）。
 
-- **粒度**：每会话一把（key=`<user_id>/<cid>`，锁文件 `<cid>.json.lock`）。不同会话/用户互不阻塞。只锁写，不锁读（读配合原子写恒读到完整旧/新版）。
+- **粒度**：每会话一把（key=`<user_id>/<cid>`，锁文件 `<cid>.json.lock`）。不同会话/用户互不阻塞。只锁写，不锁读（读走库单行查询，恒读到完整旧/新版）。
 - **只在 4 个入口加锁**（`/agent/chat` 生成、`compact` 命令、`POST /compact`、`PATCH`/`DELETE`），核心读写函数本身不取锁 → **无嵌套、无重入需求**，threading.Lock（非重入）即安全。
 - **单飞**：`/agent/chat` 入口 `acquire_conversation(cid, owner_id, wait=CHAT_LOCK_WAIT=10)`，锁贯穿整段 SSE，于外层 `_streamed()` 的 `finally` 释放（完成/异常/客户端断开 `GeneratorExit` 均释放）。取不到 → `409`。`wait=10` 覆盖"中断后立刻重发"时上一请求的释放窗口；真并发（另一设备/管理端）等满 10s → 409。
 - **中断 = 丢弃**：用户点停止 → 前端 abort SSE → 服务端下一次 yield 抛 `GeneratorExit` → 进 finally 放锁；因**未走到 `append_turn`**，本轮 user+assistant 整体不落盘（与"持久化只在 done 后"天然一致）。中途的自动压缩若已落盘则保留（与当前轮无关）。

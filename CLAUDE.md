@@ -79,7 +79,7 @@ Both started in `create_app()` as daemon threads. Config in `agent_service/mcp/l
 
 ### Conversation Persistence
 
-Stored as `agent_service/conversations/<uuid_hex>.json`. The `compact_at` pointer separates compressed history (kept for audit) from active history. `get_history()` prepends the summary as a system message. Two compaction levels: L1 manual (`compact` command), L2 auto-triggered at 80% of 32k token budget.
+Stored in the MySQL `conversations` table (denormalized metadata columns for fast listing + a JSON `body` column holding the full conversation). `ensure_table()` runs at startup and `migrate_files_to_db()` idempotently imports any legacy `agent_service/conversations/<user_id>/<uuid>.json` files (kept on disk as read-only backups; reads fall back to them on a DB miss). `save_conversation` upserts; `list_conversations` queries metadata only. The `agent_service/conversations/` dir now holds only filelock lock files and those legacy backups. The `compact_at` pointer separates compressed history (kept for audit) from active history. `get_history()` prepends the summary as a system message. Two compaction levels: L1 manual (`compact` command), L2 auto-triggered at 80% of 32k token budget.
 
 ### API Key Encryption
 

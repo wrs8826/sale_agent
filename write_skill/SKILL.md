@@ -79,7 +79,7 @@ F:/销售agent/
 | `agent.py` | `POST /agent/chat`（SSE，QA 图驱动）+ `POST /feedback`（清洗子图） |
 | `knowledge.py` | `/files` CRUD、`POST /upload`（`ALLOWED_EXT`=.txt/.md/.rst/.html/.pdf/.docx）、`POST /ingest`（SSE，读取走 `extract_text_from_file`；清洗后纯文本回写原文件、PDF/.docx 二进制原件**不回写**以保留原文供 `read_document`；**不再自行 embed/写 Chroma**——嵌入索引归口到 `get_rag()` 重建，仅 `invalidate_rag()`）、`POST /query`、`POST /vectordb/clear`、`GET /download/<file>`（下载工具产物，防目录穿越）。**PDF/.docx 现已能进入混合检索**：`DocumentLoader` 重建索引时对二进制文档走 `extract_text_from_file`，`allowed_extensions` 含 `.pdf/.docx` |
 | `settings.py` | `GET/POST /settings` + `POST /settings/test`（四模型连通测试） |
-| `conversations.py` | 会话 CRUD + `/conversations/<id>/compact` + `compact_conversation()`（头尾保留+中间折叠压缩）；**按用户子目录隔离**（`conversations/<user_id>/<uuid>.json`），所有路由校验归属，admin 可跨用户访问；**会话级单飞锁**（进程内 `threading.Lock`+跨进程 `filelock`）：`acquire_conversation`/`conversation_lock`，同会话同刻只允许一个生成/压缩/改删，取不到回 `409`（防并发丢更新 + 生成期间禁止再发，须先中断） |
+| `conversations.py` | 会话 CRUD + `/conversations/<id>/compact` + `compact_conversation()`（头尾保留+中间折叠压缩）；**存 MySQL `conversations` 表**（元数据列 + JSON `body` 列，`ensure_table()` 启动建表 + `migrate_files_to_db()` 幂等迁移历史 JSON，旧文件留磁盘作只读备份/读回退）；`save_conversation` upsert、`load/find_conversation` 库优先、`list_conversations` 仅查元数据列（不读 body，走 `(user_id,updated_at)` 索引）；所有路由校验归属，admin 可跨用户访问；**会话级单飞锁**（进程内 `threading.Lock`+跨进程 `filelock`，锁文件仍落 `CONVERSATIONS_DIR/<user_id>/<cid>.json.lock`）：`acquire_conversation`/`conversation_lock`，同会话同刻只允许一个生成/压缩/改删，取不到回 `409`（防并发丢更新 + 生成期间禁止再发，须先中断） |
 | `policy_skill.py` | **政策 skill 更新蓝图（仅 admin 端注册 + admin 角色校验）**：`/admin/policy-staging`（暂存列/删）、`/admin/policy-skill/draft`（SSE，复用清洗子图 + `policy_skill_maker` body 生成结构化草稿）、`/draft/<id>`（审核）、`/publish`（人工确认后落 `skills/`，备份旧件 + `load_skills(force=True)` 热重载 + 删暂存源与草稿）、`/discard`。agent 只产草稿不碰 live skills/；与 `/agent/chat` 完全隔离 |
 | `lark_agent.py` | 飞书蓝图：`GET /lark/status` + `POST /lark/chat` + SocketIO namespace `/lark` |
 | `socketio_instance.py` | 共享 SocketIO 实例（threading 模式），防循环导入 |
@@ -141,6 +141,10 @@ CREATE TABLE users (
 ```
 
 `user_settings` 格式与 `config.yaml` 四段一致（chat / cleaner / reranker / embedding），api_key 以 Fernet 加密（`enc:` 前缀）。空字段表示继承系统全局设置。
+
+库内另有两张自动建表（启动 `ensure_table()` 幂等创建）：
+- **`conversations`** —— 会话持久化（`conversations.py`）。元数据列 `id/user_id/title/has_summary/compact_at/message_count/created_at/updated_at` + `body LONGTEXT`（整个会话 JSON）；索引 `(user_id, updated_at)` 供列表查询。详见 `references/conversation-storage.md`。
+- **`conversation_stats`** —— 自动压缩计数（`conv_stats.py`），主键 `(user_id, conversation_id)`。
 
 连接配置（优先环境变量，兜底硬编码）：
 
@@ -212,7 +216,8 @@ pip install cryptography PyMySQL   # API key 加密 + MySQL 驱动
 # 关键文件位置
 agent_service/.secret_key          # Fernet 密钥（首次运行自动生成，已加 .gitignore）
 agent_service/config.yaml          # 配置主文件
-agent_service/conversations/*.json # 会话持久化
+MySQL sales_agent.conversations    # 会话持久化（元数据列 + JSON body 列；启动自动从旧文件迁移）
+agent_service/conversations/       # 会话锁文件(.json.lock) + 旧 JSON 只读备份
 agent_service/chroma_persist/      # 向量库
 ```
 

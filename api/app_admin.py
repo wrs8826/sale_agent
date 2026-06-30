@@ -24,7 +24,7 @@ from api.session_store import configure_session
 from api.conv_stats import ensure_table as ensure_stats_table
 from api.agent import bp as agent_bp
 from api.auth import bp as auth_bp
-from api.conversations import bp as conversations_bp
+from api.conversations import bp as conversations_bp, ensure_table as ensure_conv_table
 from api.knowledge import bp as knowledge_bp
 from api.settings import bp as settings_bp
 from api.users import bp as users_bp
@@ -51,6 +51,7 @@ def create_app() -> Flask:
     WIKI_DIR.mkdir(exist_ok=True)
     CONVERSATIONS_DIR.mkdir(exist_ok=True)
     ensure_stats_table()
+    ensure_conv_table()   # 建 conversations 表 + 幂等迁移历史 JSON 文件入库
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(agent_bp)
