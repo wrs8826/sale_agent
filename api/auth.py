@@ -157,7 +157,7 @@ def login():
     session["role"] = row["role"]
     session.permanent = True
 
-    return jsonify({"username": username, "role": row["role"]})
+    return jsonify({"user_id": row["id"], "username": username, "role": row["role"]})
 
 
 @bp.route("/admin-login", methods=["POST"])
@@ -189,7 +189,7 @@ def admin_login():
     session["role"] = row["role"]
     session.permanent = True
 
-    return jsonify({"username": username, "role": row["role"]})
+    return jsonify({"user_id": row["id"], "username": username, "role": row["role"]})
 
 
 @bp.route("/logout", methods=["POST"])

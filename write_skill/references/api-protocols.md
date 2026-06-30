@@ -156,15 +156,15 @@
 ```json
 { "username": "...", "password": "..." }
 ```
-响应：`200 { username, role }` / `401 密码错误`
+响应：`200 { user_id, username, role }` / `401 密码错误`
 
-接受 user 和 admin 角色，写入 Flask session（7 天有效）。
+接受 user 和 admin 角色，写入 Flask session（7 天有效）。响应与 `/auth/me` 同形（含 `user_id`），前端 setAuth 后无需再请求 `/auth/me` 即可拿到自身 id。
 
 ### `POST /auth/admin-login`
 ```json
 { "username": "...", "password": "..." }
 ```
-响应：`200 { username, role }` / `401 密码错误` / `403 非 admin`
+响应：`200 { user_id, username, role }` / `401 密码错误` / `403 非 admin`
 
 role ≠ admin 时即使密码正确也返回 403。
 
