@@ -180,7 +180,9 @@ def _streamed():
 
 **关键：测量与发送分离**。`api/agent.py` 的 `generate()` 里顺序是
 ①`should_auto_compact`（按轮）/ token 兜底触发自动压缩 → ②`state["history"] = window_history(state["history"])` 再发图。
-所以窗口不影响压缩触发判定，只瘦身实际请求。飞书路径不调用（lark 自带 10 轮滚动历史）。
+所以窗口不影响压缩触发判定，只瘦身实际请求。飞书路径不调用 `window_history`——飞书自己在
+`lark_bot._maybe_reset_context()` 里按 token 占比触发 `lark_history.split_for_reset()`，
+硬保留头 2 + 尾 5 轮、丢弃中间（归档进 wiki，不留 LLM 摘要），与本节的"折中间段进摘要"机制不同。
 
 发送效果：`头 3 轮原文(工具已剪) + [中间历史摘要] + 尾 10 轮(含工具)`。
 

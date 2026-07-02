@@ -47,7 +47,7 @@ F:/销售agent/
 | `mcp/lark_mcp.json` | 飞书凭证（顶层 `app_id/app_secret/...` + `oauth_redirect_uri` + `public_base_url`：对外基地址，飞书下载绝对链接用，缺省回退 oauth_redirect_uri 的 origin）+ MCP 服务器配置（`mcpServers`）。**注册两个 MCP server**：`lark-mcp`（官方 `@larksuiteoapi/lark-mcp`，纯飞书工具）+ `builtin-tools`（`python -m agent_service.mcp.builtin_mcp_server`，3 个核心工具） |
 | `mcp/mcp_manager.py` | `MCPManager` 单例：后台 asyncio 线程，`MultiServerMCPClient(mcpServers)` 把**两个 server 的工具合并**成 `self._tools` 注入飞书 ReAct Agent；状态回调，同步桥接 |
 | `mcp/lark_bot.py` | `LarkBot` 单例：`lark-oapi` SDK 长连接接收飞书消息；`_query()` 入口调 `detect_skill()` 注入 skill 提示词，两条路径（MCP Agent / RAG QA 图）均感知 skill。**幂等去重**：`message_id` 有界 LRU（`_seen_before`，派发线程前拦截飞书 at-least-once 重推）；**会话单飞**：按 `open_id::chat_id` 进程内锁（`_conv_lock`）串行覆盖「读历史→生成→append_turn」，消除 `lark_history.append_turn` 的 read-modify-write 竞态。二者均**仅进程内**——两个进程都 `start()` 飞书机器人时跨进程不互斥（见 common-pitfalls #41/二）|
-| `mcp/lark_history.py` | 飞书机器人对话历史持久化：`load_history` / `append_turn` / `clear_history`；文件存 `agent_service/lark_conversations/` |
+| `mcp/lark_history.py` | 飞书机器人对话历史持久化：`load_history` / `append_turn` / `clear_history` / `split_for_reset`；文件存 `agent_service/lark_conversations/`。`lark_bot._maybe_reset_context()` 每轮后按 `api.conversations.MAX_CONTEXT_TOKENS*COMPACT_THRESHOLD`（与网页端同一"80%"预算）检测 token 占比，超阈值即调 `split_for_reset` 只保留头 `HEAD_KEEP_TURNS=2` + 尾 `TAIL_KEEP_TURNS=5` 轮，中间段清洗归档进 wiki（`_archive_dropped_turns`，无 LLM 摘要留存于对话内，与网页端 L3 折叠不同）；`append_turn` 另有 `_HARD_CAP_TURNS=30` 兜底截断 |
 | `mcp/builtin_tools.py` | 内置 LangChain `@tool` 单一实现源 + 两套工具集：`BUILTIN_TOOLS`（核心，网页端+飞书 QA 降级共用：`get_current_time` / `load_policy_file` / `generate_word_document`）与 `WEB_TOOLS`（核心 + `read_document` / `list_documents` 文档读取，**仅网页端**）；`build_tool_table(tools)` 按集生成清单。`generate_word_document` 正文经 `_render_body` 渲染（识别 Markdown 表格→带边框 `Table Grid` 表、首行加粗，其余按段落；加粗/列表暂未解析）。`read_document` 读 `docs/` 整篇文本，依赖 `extract_text_from_file(path)`（`.pdf`→PyMuPDF 取文本+pdfplumber 取表格按位置合并去重 / `.docx`→unstructured 结构化提取(标题→`## `/表格→管道/页眉页脚)，回退 python-docx 按 body XML 顺序遍历 / 纯文本→UTF-8；该函数同时供 `/ingest` 用）。**读 Word 用 unstructured，写 Word（`generate_word_document`）用 python-docx**。**飞书隔离**：靠 `ChatState.web_tools` 标志区分，飞书两条路径都不带，拿不到文档读取。**注意**：此文件非 MCP，仅文件名归类在 mcp/ 下 |
 | `mcp/builtin_mcp_server.py` | 把内置工具暴露为 MCP（飞书路径），`FastMCP("builtin-tools")`。**已转发 3 个核心工具**：`get_current_time` / `load_policy_file` / `generate_word_document`（与 `BUILTIN_TOOLS` 一致），均注入飞书 ReAct Agent。文档读取工具（`read_document` / `list_documents`）**刻意未转发**，只走网页端 `WEB_TOOLS`。`generate_word_document` 转发层用 `_public_base_url()` 把相对 `/download/` 链接重写为绝对 URL（仅飞书路径，网页端仍相对），并**追加「请把链接发给用户」指令**（飞书无下载按钮 UI；网页端工具返回保持中性、靠系统提示约定不粘链接，二者不冲突）。`/download` 路由无 `login_required`，公开可访问，故绝对链接飞书用户可直接下载。新增工具若也要给飞书用才需在此加 `@mcp_server.tool()` 转发。**注意**：转发层的 docstring 是飞书侧 LLM 读到的工具 schema 的独立副本，改 `builtin_tools` 工具说明须手工同步此处（见 common-pitfalls #39） |
 
@@ -89,7 +89,7 @@ F:/销售agent/
 | 文件 | 职责 |
 |---|---|
 | `login.html` | **用户端登录 + 注册**（tab 切换）；注册字段：用户名/密码/确认密码/手机号/部门 |
-| `user.html` | 用户端：**三页侧栏布局**（上传资料 / 智能问答 / 系统设置），260px 固定左侧导航，含会话侧栏、自动压缩、反馈、四段模型设置 |
+| `user.html` | 用户端：**三页侧栏布局**（上传资料 / 智能问答 / 系统设置），260px 固定左侧导航，含**抽拉式会话侧栏**（`.conv-sidebar-wrap` + `#conv-sidebar-toggle`，240px⇄0 收起/展开，状态存 `localStorage.convSidebarCollapsed`）、自动压缩、反馈、四段模型设置 |
 | `login.html` | **用户端登录 + 注册**（tab 切换）；注册字段：用户名/密码/确认密码/手机号/部门 |
 | `user.html` | 用户端：三页侧栏布局（上传资料 / 智能问答 / 系统设置） |
 | `assets/common.css` | 三页共享样式（header / panel / tabs / 设置抽屉 / 状态圆点） |
@@ -101,7 +101,7 @@ F:/销售agent/
 | 路径 | 职责 |
 |---|---|
 | `src/pages/KnowledgePage.tsx` | 知识库管理：上传（含「普通资料 / 政策材料」类型切换，政策走 `kind=policy` 隔离暂存）、文件列表、RAG 参数、检索测试 |
-| `src/pages/ChatPage.tsx` | Agent 对话：实时 SSE 流式对话、评分反馈、回形针上传 |
+| `src/pages/ChatPage.tsx` | Agent 对话：实时 SSE 流式对话、评分反馈、回形针上传、**抽拉式会话侧栏**（`w-56⇄w-0` + `ChevronLeft/ChevronRight` 拉手，与 user.html 同一模式） |
 | `src/pages/PolicySkillPage.tsx` | **政策 Skill 更新**：暂存政策材料列表 → 「生成草稿」（SSE 调 `/admin/policy-skill/draft`）→ 审核弹窗（SKILL.md + references + 变更点）→ 发布/丢弃。隔离于正常对话 |
 | `src/pages/UsersPage.tsx` | 用户管理：表格 CRUD、添加/编辑/封禁/删除模态框 |
 | `src/pages/SettingsPage.tsx` | 系统设置：5 张配置卡片（对话/清洗/Embedding/重排序/Wiki） |

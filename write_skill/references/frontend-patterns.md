@@ -271,7 +271,7 @@ const res = await fetch('/ingest', {
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│ .conv-sidebar 240px  │  .chat-main（flex: 1）            │
+│ .conv-sidebar 240px ›│  .chat-main（flex: 1）            │
 │  ─ 新对话按钮        │  ─ chat-header（标题）            │
 │  ─ 分组标签          │  ─ chat-body（消息流）            │
 │    今天 / 昨天 / …   │  ─ feedback-bar                   │
@@ -280,6 +280,22 @@ const res = await fetch('/ingest', {
 │     / 删除按钮)      │                                   │
 └──────────────────────────────────────────────────────────┘
 ```
+
+#### 抽拉式会话侧栏（收起/展开）
+
+`.conv-sidebar-wrap`（`position: relative`，不裁剪）包住两个子元素：
+
+```html
+<div class="conv-sidebar-wrap">
+  <div class="conv-sidebar" id="conv-sidebar">…新对话按钮 + #conv-list…</div>
+  <button class="conv-sidebar-toggle" id="conv-sidebar-toggle">‹ 或 › 图标</button>
+</div>
+```
+
+- `.conv-sidebar` 宽度 `240px ⇄ 0`（`transition: width`）由 `.collapsed` 类切换；拉手按钮**是 `.conv-sidebar` 的兄弟节点**、不是子节点——若塞进 `.conv-sidebar` 内部会被它的 `overflow: hidden` 裁掉，收起后彻底看不见、拉不回来。
+- 拉手固定 `position: absolute; right: -13px`（相对 wrap 定位），宽度收起到 0 时会自然移动到侧栏与主聊天区的分界线上，视觉上像一个贴边小拉杆。
+- 图标方向：CSS 用 `.conv-sidebar.collapsed + .conv-sidebar-toggle svg { transform: rotate(180deg) }`（同一个 `<polyline>` 左箭头旋转 180° 变右箭头），**不是**两套图标切换。
+- 状态持久化：`localStorage.setItem('convSidebarCollapsed', '0'|'1')`，页面加载时读取并应用，刷新后记住上次的收起/展开状态。
 
 #### 会话管理函数
 
@@ -504,7 +520,7 @@ user.html 和 admin/chat.html 各自有一份星级反馈实现，**没有抽出
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│ aside 224px（对话历史侧边栏）│  主对话区（flex: 1）              │
+│ aside 224px（对话历史侧边栏）›│  主对话区（flex: 1）              │
 │  ─ [+ 新对话] 按钮          │  ─ 标签栏（多个并行对话 tab + ➕） │
 │  ─ 分组标签                 │  ─ Topbar（标题 + 清空按钮）      │
 │    今天 / 昨天 /            │  ─ Info banner（可关闭）           │
@@ -513,6 +529,8 @@ user.html 和 admin/chat.html 各自有一份星级反馈实现，**没有抽出
 │    (悬停：重命名 / 删除)    │  ─ KB状态 + 输入框                 │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+**抽拉式侧栏**（与 `web/user.html` 同一模式，Tailwind 实现）：`<aside>` 外包一层 `<div className="relative flex-shrink-0 flex">`（不裁剪），`<aside>` 自身用 `transition-[width]` 在 `w-56 ⇄ w-0`（配 `border-r-0`）间切换；拉手 `<button>` 是 `<aside>` 的**兄弟节点**、`absolute -right-[13px]` 定位，图标用 `lucide-react` 的 `ChevronLeft`/`ChevronRight` 按 `convSidebarCollapsed` 状态条件渲染（两个真实图标互换，不是旋转同一个）。状态存 `useState(() => localStorage.getItem('convSidebarCollapsed') === '1')`，`useEffect` 里回写 `localStorage`，与用户端的 key 同名但各自独立 storage（不同源不共享）。
 
 ### 多对话并行（tabs）
 

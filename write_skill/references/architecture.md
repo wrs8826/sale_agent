@@ -78,7 +78,7 @@ Session 数据存储在 Redis，实现空闲超时退出 + 短期免登录。
 | `REDIS_PORT` | `6379` | Redis 端口 |
 | `REDIS_PASSWORD` | `123456` | Redis 密码 |
 | `REDIS_DB` | `0` | Redis 数据库编号 |
-| `SESSION_IDLE_MINUTES` | `30` | 空闲超时分钟数 |
+| `SESSION_IDLE_MINUTES` | `240`（4 小时） | 空闲超时分钟数 |
 
 **工作原理：**
 
@@ -437,6 +437,10 @@ app 启动 → lark_bot.start()
             是 → mcp_manager.run_agent_sync(text, chat_cfg, history)  ← ReAct Agent 可调飞书工具
             否 → build_qa_graph().stream(state)  ← 降级：纯 RAG 问答
         ↓ lark_history.append_turn(...)               ← 持久化本轮
+        ↓ _maybe_reset_context(open_id, chat_id)       ← token 占比超 80% 阈值？
+            是 → lark_history.split_for_reset() 只留头 2 尾 5 轮
+              → _archive_dropped_turns() 归档中间段进 wiki（清洗，同 _save_and_clear 管线）
+              → 回复末尾追加一行提示
         ↓ client.im.v1.message.reply()
 ```
 
@@ -459,7 +463,16 @@ app 启动 → lark_bot.start()
 ```
 
 - **唯一标识**：`open_id`（飞书用户 ID）+ `chat_id`（会话 ID）；P2P 聊天天然一对一
-- **滚动窗口**：只保留最近 `MAX_TURNS=10` 轮（20 条消息），超出自动截断旧消息
+- **上下文占比自动重置**：每轮 `append_turn` 后，`lark_bot._maybe_reset_context()` 用
+  `api.conversations.estimate_history_tokens` 估算历史 token 数，超过
+  `MAX_CONTEXT_TOKENS * COMPACT_THRESHOLD`（与网页端共用同一份"80%"预算常量）时触发
+  `lark_history.split_for_reset()`：只保留最开始 `HEAD_KEEP_TURNS=2` 轮 + 最近
+  `TAIL_KEEP_TURNS=5` 轮，中间段整体丢弃。丢弃前由 `_archive_dropped_turns()` 清洗成摘要
+  写入 wiki（复用 `_save_and_clear` 的清洗管线，缺 cleaner API Key 时跳过归档但仍会重置），
+  回复末尾附加一行提示告知用户。与网页端 L3 压缩不同：**不做 LLM 折叠保留摘要在对话内**，
+  中间段只进 wiki 知识库，不再作为该会话上下文的一部分。
+- **兜底硬上限**：`append_turn` 自身仍以 `_HARD_CAP_TURNS=30` 轮做截断，防止上面的检测因故
+  未触发时历史无限增长（正常情况下远轮不到这里）。
 - **原子写**：tmp → replace，防文件半写损坏
 - **读写失败不阻塞回复**：异常只打印警告，不中断消息处理流程
 

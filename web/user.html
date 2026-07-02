@@ -174,14 +174,36 @@
     /* ══ 对话页：DeepSeek 风格双栏布局 ══════════════════════════════ */
     #page-chat { flex-direction: row; }
 
-    /* 会话侧栏 */
+    /* 会话侧栏（抽拉式：wrap 不裁剪，方便把拉手按钮露在边框外） */
+    .conv-sidebar-wrap {
+      position: relative; flex-shrink: 0;
+      display: flex;
+    }
     .conv-sidebar {
       width: 240px; flex-shrink: 0;
       background: #f7f7f8;
       border-right: 1px solid #e5e7eb;
       display: flex; flex-direction: column;
       overflow: hidden;
+      transition: width .18s ease;
     }
+    .conv-sidebar.collapsed {
+      width: 0; border-right-color: transparent;
+    }
+    .conv-sidebar-toggle {
+      position: absolute; top: 50%; right: -13px;
+      transform: translateY(-50%);
+      width: 22px; height: 44px;
+      background: #fff; border: 1px solid #e5e7eb; border-left: none;
+      border-radius: 0 8px 8px 0;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; color: #9ca3af;
+      transition: background .12s, color .12s;
+      z-index: 5;
+    }
+    .conv-sidebar-toggle:hover { background: #f0f5ff; color: #3b82f6; }
+    .conv-sidebar-toggle svg { transition: transform .18s ease; }
+    .conv-sidebar.collapsed + .conv-sidebar-toggle svg { transform: rotate(180deg); }
     .conv-sidebar-top {
       padding: 12px 10px 8px;
       flex-shrink: 0;
@@ -728,17 +750,22 @@
   <!-- ── 智能问答（DeepSeek 风格双栏） ─────────────────────────────── -->
   <div class="page" id="page-chat">
 
-    <!-- 会话侧栏 -->
-    <div class="conv-sidebar">
-      <div class="conv-sidebar-top">
-        <button class="new-conv-btn" id="btn-new-conv">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-          新对话
-        </button>
+    <!-- 会话侧栏（抽拉式：点击拉手收起/展开） -->
+    <div class="conv-sidebar-wrap">
+      <div class="conv-sidebar" id="conv-sidebar">
+        <div class="conv-sidebar-top">
+          <button class="new-conv-btn" id="btn-new-conv">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            新对话
+          </button>
+        </div>
+        <div class="conv-list" id="conv-list">
+          <div class="conv-empty">暂无对话历史<br>点击「新对话」开始</div>
+        </div>
       </div>
-      <div class="conv-list" id="conv-list">
-        <div class="conv-empty">暂无对话历史<br>点击「新对话」开始</div>
-      </div>
+      <button class="conv-sidebar-toggle" id="conv-sidebar-toggle" title="收起对话历史" aria-label="收起对话历史">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
     </div>
 
     <!-- 主对话区 -->
@@ -1213,6 +1240,22 @@ const attachChip  = document.getElementById('attach-chip');
 const feedbackBar = document.getElementById('feedback-bar');
 const convList    = document.getElementById('conv-list');
 const chatTabsEl  = document.getElementById('chat-tabs');
+
+// ── 会话侧栏抽拉：点击拉手收起/展开，记忆到 localStorage ──────────────────
+const convSidebar       = document.getElementById('conv-sidebar');
+const convSidebarToggle = document.getElementById('conv-sidebar-toggle');
+function setConvSidebarCollapsed(collapsed) {
+  convSidebar.classList.toggle('collapsed', collapsed);
+  convSidebarToggle.title = collapsed ? '展开对话历史' : '收起对话历史';
+  convSidebarToggle.setAttribute('aria-label', convSidebarToggle.title);
+  try { localStorage.setItem('convSidebarCollapsed', collapsed ? '1' : '0'); } catch (_) {}
+}
+convSidebarToggle.addEventListener('click', () => {
+  setConvSidebarCollapsed(!convSidebar.classList.contains('collapsed'));
+});
+try {
+  if (localStorage.getItem('convSidebarCollapsed') === '1') setConvSidebarCollapsed(true);
+} catch (_) {}
 
 function genId() { return Math.random().toString(36).slice(2); }
 

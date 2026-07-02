@@ -237,6 +237,12 @@ class LarkBot:
                     except Exception as exc:
                         print(f"[lark_bot] 历史写入失败（不影响回复）: {exc}")
 
+                    # 上下文占比检测：达到模型上下文预算 80% 时归档中间段并重置，
+                    # 仅保留最开始 2 轮 + 最近 5 轮，避免历史无限增长。
+                    notice = self._maybe_reset_context(open_id, chat_id)
+                    if notice:
+                        reply_text = f"{reply_text}\n\n{notice}"
+
                 self._send_reply(message_id, reply_text)
 
         except Exception as exc:
@@ -361,6 +367,98 @@ class LarkBot:
             print(f"[lark_bot] 历史删除失败: {exc}")
 
         return result_msg
+
+    def _maybe_reset_context(self, open_id: str, chat_id: str) -> str:
+        """历史 token 占比达到模型上下文预算 80% 时，归档中间段并只保留首尾。
+
+        复用网页端会话压缩的预算常量（api.conversations.MAX_CONTEXT_TOKENS /
+        COMPACT_THRESHOLD），保持"80%"口径与网页端一致；但飞书侧不做 LLM 折叠，
+        直接丢弃中间段（丢弃前先清洗归档进 wiki，避免内容彻底丢失）。
+
+        返回非空字符串表示已重置，调用方应把它追加到本轮回复末尾提示用户；
+        返回空字符串表示未触发或本次跳过（都不影响已生成的回复）。
+        """
+        try:
+            from agent_service.mcp.lark_history import load_history
+            from api.conversations import estimate_history_tokens, MAX_CONTEXT_TOKENS, COMPACT_THRESHOLD
+
+            history = load_history(open_id, chat_id)
+            tokens = estimate_history_tokens(history)
+            threshold = int(MAX_CONTEXT_TOKENS * COMPACT_THRESHOLD)
+            if tokens <= threshold:
+                return ""
+        except Exception as exc:
+            print(f"[lark_bot] 上下文占比检测失败（跳过重置）: {exc}")
+            return ""
+
+        try:
+            from agent_service.mcp.lark_history import split_for_reset
+            middle, kept_count = split_for_reset(open_id, chat_id)
+        except Exception as exc:
+            print(f"[lark_bot] 上下文重置失败: {exc}")
+            return ""
+        if middle is None:
+            return ""   # 轮数不够头+尾，无需重置
+
+        self._archive_dropped_turns(open_id=open_id, chat_id=chat_id, messages=middle)
+        print(f"[lark_bot] 上下文重置：约 {tokens} tokens 超过阈值 {threshold}，"
+              f"归档 {len(middle)} 条中间消息，保留 {kept_count} 条")
+        return "（上下文较长，已自动整理：保留了最开始 2 轮和最近 5 轮对话，中间部分已归档至知识库。）"
+
+    def _archive_dropped_turns(self, *, open_id: str, chat_id: str, messages: list) -> None:
+        """把上下文重置丢弃的中间轮次清洗成摘要写入 wiki（与 _save_and_clear 同管线）。
+
+        失败只打日志，不抛出——归档是尽力而为，不能因此影响已经发出的回复。
+        """
+        if not messages:
+            return
+        conv_text = "\n".join(
+            f"{'用户' if m.get('role') == 'user' else '助手'}：{m.get('content', '')}"
+            for m in messages
+        )
+        llm_input = (
+            f"用户评分：5/5\n"
+            f"用户评语：飞书机器人上下文自动重置归档\n\n"
+            f"对话记录：\n{conv_text}"
+        )
+        try:
+            from api import services
+            from agent_service.graph import build_cleaning_graph
+            from api.agent import _FEEDBACK_SYSTEM
+
+            cleaner_cfg = services.load_cleaner_settings()
+            if not cleaner_cfg.get("api_key"):
+                print("[lark_bot] 上下文重置归档跳过：未配置 cleaner API Key")
+                return
+
+            out = build_cleaning_graph().invoke({
+                "raw_text": llm_input,
+                "system_prompt": _FEEDBACK_SYSTEM,
+                "cleaner_cfg": cleaner_cfg,
+            })
+            if out.get("error"):
+                print(f"[lark_bot] 上下文重置归档清洗失败: {out['error']}")
+                return
+
+            cleaned = (out.get("cleaned_text") or "").strip()
+            if not cleaned:
+                return
+
+            wiki_dir = services.get_wiki_dir()
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            safe_uid = re.sub(r"[^\w]", "_", open_id or "lark")[:20]
+            filename = f"feedback_{safe_uid}_lark_reset_{ts}_5star.txt"
+            header = (
+                f"# 对话反馈摘要\n"
+                f"# 来源: 飞书机器人（上下文自动重置归档）\n"
+                f"# 用户 open_id: {open_id or '未知'}\n"
+                f"# 会话 chat_id: {chat_id or '未知'}\n"
+                f"# 时间: {ts}\n\n"
+            )
+            (wiki_dir / filename).write_text(header + cleaned, encoding="utf-8")
+            services.invalidate_rag()
+        except Exception as exc:
+            print(f"[lark_bot] 上下文重置归档失败（不影响已发出的回复）: {exc}")
 
     def _query(self, text: str, *, open_id: str = "", chat_id: str = "") -> str:
         """生成回复文本。

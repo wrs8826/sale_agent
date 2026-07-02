@@ -14,7 +14,7 @@
     REDIS_PORT            默认 6379
     REDIS_PASSWORD        默认 123456
     REDIS_DB              默认 0
-    SESSION_IDLE_MINUTES  默认 30（空闲超时分钟数）
+    SESSION_IDLE_MINUTES  默认 240（空闲超时分钟数，即 4 小时）
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "123456")
 REDIS_DB       = int(os.getenv("REDIS_DB",   "0"))
 
 # 空闲超时（无请求则 session 过期，用于退出到登录界面）
-SESSION_IDLE_MINUTES = int(os.getenv("SESSION_IDLE_MINUTES", "30"))
+SESSION_IDLE_MINUTES = int(os.getenv("SESSION_IDLE_MINUTES", "240"))
 SESSION_IDLE_TIMEOUT = timedelta(minutes=SESSION_IDLE_MINUTES)
 
 

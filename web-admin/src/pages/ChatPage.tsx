@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react'
 import {
   Send, Square, Trash2, Bot, User, AlertCircle, Star,
   Plus, MessageSquare, Pencil, X, Check, Copy, ChevronDown,
+  ChevronLeft, ChevronRight,
   Circle, UserCircle, Paperclip, ClipboardList, Download,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
@@ -99,6 +100,14 @@ const ChatPage: React.FC = () => {
 
   const [showInfo, setShowInfo] = useState(true)
   const [copied, setCopied] = useState<string | null>(null)
+
+  // 会话侧栏抽拉：收起/展开状态记忆到 localStorage
+  const [convSidebarCollapsed, setConvSidebarCollapsed] = useState<boolean>(
+    () => localStorage.getItem('convSidebarCollapsed') === '1'
+  )
+  useEffect(() => {
+    localStorage.setItem('convSidebarCollapsed', convSidebarCollapsed ? '1' : '0')
+  }, [convSidebarCollapsed])
 
   // KB status
   const [kbStatus, setKbStatus] = useState<'checking' | 'ready' | 'empty' | 'error'>('checking')
@@ -685,34 +694,48 @@ const ChatPage: React.FC = () => {
 
   return (
     <div className="flex h-full overflow-hidden">
-      {/* ── Conversation History Sidebar ── */}
-      <aside className="w-56 flex-shrink-0 border-r border-[#e5e5e5] bg-[#fafafa] flex flex-col overflow-hidden">
-        <div className="px-3 py-3 border-b border-[#e5e5e5]">
-          <button
-            onClick={newConversation}
-            className="w-full flex items-center justify-center gap-1.5 py-2 px-3 bg-[#3b82f6] hover:bg-[#2563eb] text-white text-xs font-medium rounded-lg transition-colors"
-          >
-            <Plus size={13} /> 新对话
-          </button>
-        </div>
-        <div className="flex-1 overflow-y-auto py-2 scrollbar-thin">
-          {convList.length === 0 && (
-            <p className="text-center text-xs text-[#9ca3af] mt-6 px-3 leading-relaxed">
-              暂无对话历史<br />点击「新对话」开始
-            </p>
-          )}
-          {groupLabels.map(([key, label]) => {
-            const items = groups[key]
-            if (!items.length) return null
-            return (
-              <div key={key}>
-                <p className="text-[10px] font-semibold text-[#9ca3af] px-4 pt-2 pb-1 uppercase tracking-wide">{label}</p>
-                {items.map(conv => <ConvItem key={conv.id} conv={conv} />)}
-              </div>
-            )
-          })}
-        </div>
-      </aside>
+      {/* ── Conversation History Sidebar（抽拉式：wrapper 不裁剪，拉手露在边框外） ── */}
+      <div className="relative flex-shrink-0 flex">
+        <aside
+          className={`border-r border-[#e5e5e5] bg-[#fafafa] flex flex-col overflow-hidden transition-[width] duration-200 ${
+            convSidebarCollapsed ? 'w-0 border-r-0' : 'w-56'
+          }`}
+        >
+          <div className="px-3 py-3 border-b border-[#e5e5e5] w-56">
+            <button
+              onClick={newConversation}
+              className="w-full flex items-center justify-center gap-1.5 py-2 px-3 bg-[#3b82f6] hover:bg-[#2563eb] text-white text-xs font-medium rounded-lg transition-colors"
+            >
+              <Plus size={13} /> 新对话
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto py-2 scrollbar-thin w-56">
+            {convList.length === 0 && (
+              <p className="text-center text-xs text-[#9ca3af] mt-6 px-3 leading-relaxed">
+                暂无对话历史<br />点击「新对话」开始
+              </p>
+            )}
+            {groupLabels.map(([key, label]) => {
+              const items = groups[key]
+              if (!items.length) return null
+              return (
+                <div key={key}>
+                  <p className="text-[10px] font-semibold text-[#9ca3af] px-4 pt-2 pb-1 uppercase tracking-wide">{label}</p>
+                  {items.map(conv => <ConvItem key={conv.id} conv={conv} />)}
+                </div>
+              )
+            })}
+          </div>
+        </aside>
+        <button
+          onClick={() => setConvSidebarCollapsed(v => !v)}
+          title={convSidebarCollapsed ? '展开对话历史' : '收起对话历史'}
+          aria-label={convSidebarCollapsed ? '展开对话历史' : '收起对话历史'}
+          className="absolute top-1/2 -right-[13px] -translate-y-1/2 w-[22px] h-11 bg-white border border-[#e5e5e5] border-l-0 rounded-r-lg flex items-center justify-center text-[#9ca3af] hover:text-[#3b82f6] hover:bg-[#f0f5ff] transition-colors z-10"
+        >
+          {convSidebarCollapsed ? <ChevronRight size={13} /> : <ChevronLeft size={13} />}
+        </button>
+      </div>
 
       {/* ── Chat Area ── */}
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">

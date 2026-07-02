@@ -6,6 +6,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "web-admin", "run", "dev"],
       "port": 5173
+    },
+    {
+      "name": "user-app",
+      "runtimeExecutable": "E:/miniconda/envs/agent/python.exe",
+      "runtimeArgs": ["-m", "api.app_user"],
+      "port": 5001
     }
   ]
 }

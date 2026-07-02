@@ -71,7 +71,7 @@ Two parallel modules in `agent_service/mcp/`:
 |---|---|
 | `mcp_manager.py` | Singleton: loads Feishu MCP tools via `langchain-mcp-adapters`, background asyncio thread |
 | `lark_bot.py` | Singleton: `lark-oapi` SDK WebSocket long-connection bot; receives P2P messages, loads history, calls QA graph, persists turn, replies |
-| `lark_history.py` | File-based chat history for the Feishu bot: `load_history` / `append_turn` / `clear_history`; files in `agent_service/lark_conversations/`, keyed by `open_id + chat_id`, rolling window of 10 turns |
+| `lark_history.py` | File-based chat history for the Feishu bot: `load_history` / `append_turn` / `clear_history` / `split_for_reset`; files in `agent_service/lark_conversations/`, keyed by `open_id + chat_id`. `lark_bot._maybe_reset_context()` checks token usage after each turn and, once it exceeds 80% of `api.conversations.MAX_CONTEXT_TOKENS` (same budget constant as the web side), calls `split_for_reset` to keep only the first 2 turns + last 5 turns, archiving the dropped middle to wiki (no LLM folding, unlike the web side's L3 compaction) |
 
 Both started in `create_app()` as daemon threads. Config in `agent_service/mcp/lark_mcp.json` (top-level `app_id`/`app_secret` shared by both; `mcpServers` used only by `mcp_manager`).
 
